@@ -1,0 +1,4 @@
+interface:
+  display_name: "DBeaver Database Operator"
+  short_description: "Explore and modify databases through DBeaver"
+  default_prompt: "Use $dbeaver-database-operator to inspect a datasource, run the requested operation, and verify the result."
