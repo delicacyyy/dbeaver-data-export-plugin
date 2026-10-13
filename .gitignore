@@ -1,0 +1,11 @@
+target/
+dependency-reduced-pom.xml
+.idea/
+*.iml
+.DS_Store
+publish/
+.mvn/wrapper/maven-wrapper.jar
+__pycache__/
+*.py[cod]
+.agent/*
+!.agent/AGENTS.md

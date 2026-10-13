@@ -28,7 +28,7 @@ a loopback IP URL and does not follow administrative redirects. See
 From PowerShell, set the paths once (the token variable contains a **path**):
 
 ```powershell
-$dbApi = ".\dbeaver-data-export-plugin\skills\dbeaver-database-operator\scripts\dbeaver_api.py"
+$dbApi = ".\skills\dbeaver-database-operator\scripts\dbeaver_api.py"
 $tokenFile = $env:DBEAVER_DATA_API_TOKEN_FILE
 ```
 
