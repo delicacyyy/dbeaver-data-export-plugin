@@ -12,9 +12,11 @@ import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -33,6 +35,7 @@ public final class DataExportPlugin implements PluginEntry {
     private static final int DEFAULT_ROWS_TIMEOUT_SECONDS = 30;
     private static final int DEFAULT_EXECUTE_TIMEOUT_SECONDS = 30;
     private static final int MAX_EXECUTE_BODY_BYTES = 1024 * 1024;
+    private static CreationAccess creationAccess;
     private static volatile ClassLoader dbeaverClassLoader;
     private static final AtomicBoolean started = new AtomicBoolean(false);
     private static int port;
@@ -47,6 +50,7 @@ public final class DataExportPlugin implements PluginEntry {
 
     @Override public void init(Environment env, PluginConfig config) {
         port = Integer.getInteger(PORT_PROPERTY, DEFAULT_PORT);
+        creationAccess = CreationAccess.load();
     }
 
     @Override public List<MyTransformer> getTransformers() {
@@ -100,44 +104,129 @@ public final class DataExportPlugin implements PluginEntry {
     // -- Router ---------------------------------------------------------------
 
     private static void dispatch(Object ex) {
+        boolean administrative = false;
         try {
             String method = (String) callR(
                     ex, httpExchangeClass, "getRequestMethod", new Class<?>[0]);
             URI uri = (URI) callR(
                     ex, httpExchangeClass, "getRequestURI", new Class<?>[0]);
             String path = uri.getPath();
-            java.util.Map<String,String> q = queryParams(uri);
-            String result;
-
-            switch (path) {
-                case "/datasources": result = handleDatasourcesR(); break;
-                case "/schema":      result = handleSchemaR(q); break;
-                case "/rows":        result = handleRowsR(q); break;
-                case "/execute":
-                    if ("POST".equalsIgnoreCase(method)) {
-                        InputStream body = (InputStream) callR(
-                                ex, httpExchangeClass, "getRequestBody", new Class<?>[0]);
-                        try {
-                            result = handleExecuteR(
-                                    q, readUtf8Body(
-                                            body, MAX_EXECUTE_BODY_BYTES));
-                        } finally {
-                            body.close();
-                        }
+            administrative = "/projects".equals(path) || "/drivers".equals(path)
+                    || path.startsWith("/connection-operations/")
+                    || path.startsWith("/datasources/")
+                    || ("/datasources".equals(path) && "POST".equalsIgnoreCase(method));
+            if (administrative) {
+                creationAccess.require(
+                        requestHeader(ex, "Authorization"), requestHeader(ex, "Origin"));
+                Map<String, String> query = queryParams(uri);
+                if ("/projects".equals(path)) {
+                    requireMethod(method, "GET");
+                    respondR(ex, 200, JsonRequests.toJson(DBeaverWorkspace.projectListing()));
+                } else if ("/drivers".equals(path)) {
+                    requireMethod(method, "GET");
+                    respondR(ex, 200, JsonRequests.toJson(DBeaverConnections.drivers(query)));
+                } else if (path.startsWith("/connection-operations/")) {
+                    requireMethod(method, "GET");
+                    String id = path.substring("/connection-operations/".length());
+                    if (id.isEmpty() || id.indexOf('/') >= 0) {
+                        throw new HttpException(404, "connection operation not found");
+                    }
+                    respondR(ex, 200, JsonRequests.toJson(DBeaverConnections.operation(id)));
+                } else if ("/datasources".equals(path)) {
+                    requireMethod(method, "POST");
+                    DBeaverConnections.Result result =
+                            DBeaverConnections.create(readAdministrativeRequest(ex));
+                    respondR(ex, result.status, JsonRequests.toJson(result.body));
+                } else {
+                    String[] parts = uri.getRawPath().substring("/datasources/".length())
+                            .split("/", -1);
+                    if (parts[0].isEmpty() || parts.length > 2) {
+                        throw new HttpException(404, "connection route not found");
+                    }
+                    String id = URI.create("http://127.0.0.1/" + parts[0])
+                            .getPath().substring(1);
+                    if (parts.length == 1) {
+                        requireMethod(method, "GET");
+                        respondR(ex, 200, JsonRequests.toJson(
+                                DBeaverConnections.inspect(query.get("projectId"), id)));
+                    } else if ("edit".equals(parts[1]) || "test".equals(parts[1])) {
+                        requireMethod(method, "POST");
+                        Map<String, Object> request = readAdministrativeRequest(ex);
+                        DBeaverConnections.Result result = "edit".equals(parts[1])
+                                ? DBeaverConnections.edit(query.get("projectId"), id, request)
+                                : DBeaverConnections.test(query.get("projectId"), id, request);
+                        respondR(ex, result.status, JsonRequests.toJson(result.body));
                     } else {
-                        throw new HttpException(
-                                405, "POST required for /execute");
+                        throw new HttpException(404, "connection route not found");
+                    }
+                }
+                return;
+            }
+
+            Map<String, String> query = queryParams(uri);
+            String result;
+            switch (path) {
+                case "/datasources":
+                    requireMethod(method, "GET");
+                    result = handleDatasourcesR(query);
+                    break;
+                case "/schema":
+                    requireMethod(method, "GET");
+                    result = handleSchemaR(query);
+                    break;
+                case "/rows":
+                    requireMethod(method, "GET");
+                    result = handleRowsR(query);
+                    break;
+                case "/execute":
+                    requireMethod(method, "POST");
+                    InputStream body = (InputStream) callR(
+                            ex, httpExchangeClass, "getRequestBody", new Class<?>[0]);
+                    try {
+                        result = handleExecuteR(
+                                query, readUtf8Body(body, MAX_EXECUTE_BODY_BYTES));
+                    } finally {
+                        body.close();
                     }
                     break;
-                default: result = err("unknown: " + path);
+                default:
+                    throw new HttpException(404, "route not found");
             }
             respondR(ex, result.startsWith("{\"error\"") ? 500 : 200, result);
         } catch (IllegalArgumentException e) {
-            respondErrorOrClose(ex, 400, e);
+            respondErrorOrClose(ex, 400, administrative
+                    ? new IllegalArgumentException("invalid administrative request") : e);
         } catch (HttpException e) {
             respondErrorOrClose(ex, e.status, e);
         } catch (Exception e) {
-            respondErrorOrClose(ex, 500, e);
+            respondErrorOrClose(ex, 500, administrative
+                    ? new HttpException(500, "connection administration failed") : e);
+        }
+    }
+
+    private static String requestHeader(Object exchange, String name) throws Exception {
+        Object headers = callR(
+                exchange, httpExchangeClass, "getRequestHeaders", new Class<?>[0]);
+        return (String) callR(
+                headers, headersClass, "getFirst", new Class<?>[]{String.class}, name);
+    }
+
+    private static Map<String, Object> readAdministrativeRequest(Object exchange)
+            throws Exception {
+        String contentType = requestHeader(exchange, "Content-Type");
+        if (contentType == null || !"application/json".equalsIgnoreCase(
+                contentType.split(";", 2)[0].trim())) {
+            throw new HttpException(415, "application/json required");
+        }
+        try (InputStream body = (InputStream) callR(
+                exchange, httpExchangeClass, "getRequestBody", new Class<?>[0])) {
+            return JsonRequests.parseObject(readUtf8Body(body, MAX_EXECUTE_BODY_BYTES));
+        }
+    }
+
+    private static void requireMethod(String actual, String required) {
+        if (!required.equalsIgnoreCase(actual)) {
+            throw new HttpException(405, required + " required");
         }
     }
 
@@ -154,34 +243,37 @@ public final class DataExportPlugin implements PluginEntry {
 
     // -- Handlers -------------------------------------------------------------
 
-    private static String handleDatasourcesR() throws Exception {
-        StringBuilder j = new StringBuilder("[");
-        boolean f = true;
-        for (Object c : allContainers()) {
-            if (!f) j.append(","); f = false;
-            j.append("{").append(q("name")).append(":").append(q(call(c, "getName")))
-             .append(",").append(q("id")).append(":").append(q(call(c, "getId")))
-             .append(",").append(q("connected")).append(":").append(call(c, "isConnected"))
-             .append("}");
+    private static String handleDatasourcesR(Map<String, String> query) throws Exception {
+        DBeaverWorkspace.ProjectContext project =
+                DBeaverWorkspace.requireProject(query.get("projectId"));
+        List<Object> result = new ArrayList<Object>();
+        for (Object descriptor : DBeaverWorkspace.datasources(project)) {
+            DBeaverWorkspace.Identity identity = DBeaverWorkspace.identity(descriptor);
+            Map<String, Object> item = identity.asMap();
+            item.put("projectName", project.name);
+            item.put("connected", identity.connected);
+            result.add(item);
         }
-        return j.append("]").toString();
+        return JsonRequests.toJson(result);
     }
 
     private static String handleSchemaR(java.util.Map<String,String> q) throws Exception {
-        String n = q.get("ds");
-        if (n == null) return err("missing ?ds=");
-        Object c = findContainer(n);
-        if (c == null) return err("not found");
+        String projectId = q.get("projectId");
+        String datasourceId = q.get("dsId");
+        DBeaverWorkspace.requireId(projectId, "projectId");
+        DBeaverWorkspace.requireId(datasourceId, "dsId");
+        Object c = DBeaverWorkspace.requireDatasource(
+                DBeaverWorkspace.requireProject(projectId), datasourceId);
         ensureConnected(c);
         Object ds = call(c, "getDataSource");
         if (ds == null) return err("no dataSource");
         Object mon = createMonitorProxy(c);
         if (mon == null) return err("no progress monitor");
 
-        SchemaDiscovery discovery = new SchemaDiscovery(n, ds, mon);
+        SchemaDiscovery discovery = new SchemaDiscovery(projectId, datasourceId, ds, mon);
         String mode = q.get("mode");
         if ("full".equalsIgnoreCase(mode)) {
-            return fullSchemaJson(discovery, n, mon);
+            return fullSchemaJson(discovery, (String) call(c, "getName"), mon);
         }
         if (mode != null && !mode.isEmpty()
                 && !"children".equalsIgnoreCase(mode)) {
@@ -191,8 +283,8 @@ public final class DataExportPlugin implements PluginEntry {
 
         String parentId = q.get("parent");
         SchemaPath parent = parentId == null || parentId.isEmpty()
-                ? SchemaPath.root(n)
-                : SchemaPath.decode(parentId, n);
+                ? discovery.root
+                : SchemaPath.decode(parentId, projectId, datasourceId);
         return schemaChildrenJson(discovery.children(parent), mon);
     }
 
@@ -201,7 +293,7 @@ public final class DataExportPlugin implements PluginEntry {
      * structural path; DBeaver objects and navigator details stay inside.
      */
     private static final class SchemaDiscovery {
-        private final String dataSourceName;
+        private final SchemaPath root;
         private final Object dataSource;
         private final Object monitor;
         private final SchemaTypes types;
@@ -209,9 +301,9 @@ public final class DataExportPlugin implements PluginEntry {
         private final MetadataAdapter navigator = new NavigatorMetadataAdapter();
         private final boolean navigatorFallbackAllowed;
 
-        private SchemaDiscovery(String dataSourceName, Object dataSource, Object monitor)
-                throws Exception {
-            this.dataSourceName = dataSourceName;
+        private SchemaDiscovery(String projectId, String datasourceId,
+                Object dataSource, Object monitor) throws Exception {
+            this.root = SchemaPath.root(projectId, datasourceId);
             this.dataSource = dataSource;
             this.monitor = monitor;
             this.types = new SchemaTypes();
@@ -226,7 +318,6 @@ public final class DataExportPlugin implements PluginEntry {
         }
 
         private List<SchemaNode> rootChildren() throws Exception {
-            SchemaPath root = SchemaPath.root(dataSourceName);
             if (isMongoDataSource(dataSource)) {
                 return nodes(
                         mongoDatabases(), "datasource", root);
@@ -309,9 +400,10 @@ public final class DataExportPlugin implements PluginEntry {
         }
 
         private SchemaNode resolve(SchemaPath path) throws Exception {
-            if (!dataSourceName.equals(path.dataSourceName)) {
+            if (!root.projectId.equals(path.projectId)
+                    || !root.datasourceId.equals(path.datasourceId)) {
                 throw new IllegalArgumentException(
-                        "node id belongs to another data source");
+                        "node id belongs to another project or data source");
             }
             if (path.segments.isEmpty()) {
                 throw new IllegalArgumentException(
@@ -319,10 +411,10 @@ public final class DataExportPlugin implements PluginEntry {
             }
             Object parent = dataSource;
             String parentKind = "datasource";
-            SchemaPath resolvedPath = SchemaPath.root(dataSourceName);
+            SchemaPath resolvedPath = root;
             SchemaNode match = null;
 
-            for (SchemaSegment segment : path.segments) {
+            for (SchemaPath.Segment segment : path.segments) {
                 match = null;
                 List<SchemaNode> candidates =
                         resolvedPath.segments.isEmpty()
@@ -542,128 +634,16 @@ public final class DataExportPlugin implements PluginEntry {
         }
     }
 
-    private static final class SchemaSegment {
-        private final String kind;
-        private final String name;
 
-        private SchemaSegment(String kind, String name) {
-            this.kind = kind;
-            this.name = name;
-        }
-    }
+    static final class HttpException extends RuntimeException {
+        final int status;
 
-    /**
-     * Opaque, URL-safe and stateless qualified structural path.
-     */
-    private static final class SchemaPath {
-        private static final String VERSION = "schema-path-v1";
-        private static final int MAX_SEGMENTS = 16;
-        private final String dataSourceName;
-        private final List<SchemaSegment> segments;
-
-        private SchemaPath(String dataSourceName, List<SchemaSegment> segments) {
-            this.dataSourceName = dataSourceName;
-            this.segments = segments;
-        }
-
-        private static SchemaPath root(String dataSourceName) {
-            return new SchemaPath(
-                    dataSourceName, new java.util.ArrayList<SchemaSegment>());
-        }
-
-        private SchemaPath append(String kind, String name) {
-            java.util.ArrayList<SchemaSegment> next =
-                    new java.util.ArrayList<>(segments);
-            next.add(new SchemaSegment(kind, name));
-            return new SchemaPath(dataSourceName, next);
-        }
-
-        private String encode() {
-            try {
-                java.io.ByteArrayOutputStream bytes =
-                        new java.io.ByteArrayOutputStream();
-                java.io.DataOutputStream data =
-                        new java.io.DataOutputStream(bytes);
-                data.writeUTF(VERSION);
-                data.writeUTF(dataSourceName);
-                data.writeInt(segments.size());
-                for (SchemaSegment segment : segments) {
-                    data.writeUTF(segment.kind);
-                    data.writeUTF(segment.name);
-                }
-                data.close();
-                return java.util.Base64.getUrlEncoder().withoutPadding()
-                        .encodeToString(bytes.toByteArray());
-            } catch (java.io.IOException impossible) {
-                throw new IllegalStateException(impossible);
-            }
-        }
-
-        private static SchemaPath decode(String encoded, String expectedDataSource) {
-            SchemaPath path = decode(encoded);
-            if (!expectedDataSource.equals(path.dataSourceName)) {
-                throw new IllegalArgumentException(
-                        "node id belongs to another data source");
-            }
-            return path;
-        }
-
-        private static SchemaPath decode(String encoded) {
-            byte[] bytes;
-            try {
-                bytes = java.util.Base64.getUrlDecoder().decode(encoded);
-            } catch (IllegalArgumentException e) {
-                throw new IllegalArgumentException("invalid node id");
-            }
-            try {
-                java.io.DataInputStream data = new java.io.DataInputStream(
-                        new java.io.ByteArrayInputStream(bytes));
-                if (!VERSION.equals(data.readUTF())) {
-                    throw new IllegalArgumentException("unsupported node id");
-                }
-                String dataSourceName = data.readUTF();
-                int count = data.readInt();
-                if (count < 1 || count > MAX_SEGMENTS) {
-                    throw new IllegalArgumentException("invalid node depth");
-                }
-                java.util.ArrayList<SchemaSegment> segments =
-                        new java.util.ArrayList<>();
-                for (int i = 0; i < count; i++) {
-                    String kind = data.readUTF();
-                    String name = data.readUTF();
-                    if (!isSchemaKind(kind) || name.isEmpty()) {
-                        throw new IllegalArgumentException("invalid node segment");
-                    }
-                    segments.add(new SchemaSegment(kind, name));
-                }
-                if (data.available() != 0) {
-                    throw new IllegalArgumentException("invalid node id");
-                }
-                return new SchemaPath(dataSourceName, segments);
-            } catch (IllegalArgumentException e) {
-                throw e;
-            } catch (Exception e) {
-                throw new IllegalArgumentException("invalid node id", e);
-            }
-        }
-    }
-
-    private static final class HttpException extends RuntimeException {
-        private final int status;
-
-        private HttpException(int status, String message) {
+        HttpException(int status, String message) {
             super(message);
             this.status = status;
         }
     }
 
-    private static boolean isSchemaKind(String kind) {
-        return "catalog".equals(kind)
-                || "schema".equals(kind)
-                || "table".equals(kind)
-                || "view".equals(kind)
-                || "column".equals(kind);
-    }
 
     private static String schemaChildrenJson(
             List<SchemaNode> children, Object monitor)
@@ -731,7 +711,7 @@ public final class DataExportPlugin implements PluginEntry {
             throw new IllegalStateException("schema hierarchy is too deep");
         }
         List<SchemaNode> children = parent == null
-                ? discovery.children(SchemaPath.root(dataSourceName))
+                ? discovery.children(discovery.root)
                 : discovery.children(parent);
         java.util.ArrayList<SchemaNode> scopes = new java.util.ArrayList<>();
         java.util.ArrayList<SchemaNode> tables = new java.util.ArrayList<>();
@@ -843,7 +823,7 @@ public final class DataExportPlugin implements PluginEntry {
         long offset = nonNegativeLongParam(q, "offset", 0);
 
         SchemaPath path = SchemaPath.decode(nodeId);
-        SchemaSegment targetSegment =
+        SchemaPath.Segment targetSegment =
                 path.segments.get(path.segments.size() - 1);
         if (!"table".equals(targetSegment.kind)
                 && !"view".equals(targetSegment.kind)) {
@@ -851,11 +831,8 @@ public final class DataExportPlugin implements PluginEntry {
                     "node must identify a table, view, or collection");
         }
 
-        Object container = findContainer(path.dataSourceName);
-        if (container == null) {
-            throw new HttpException(
-                    404, "data source no longer exists: " + path.dataSourceName);
-        }
+        Object container = DBeaverWorkspace.requireDatasource(
+                DBeaverWorkspace.requireProject(path.projectId), path.datasourceId);
         ensureConnected(container);
         Object dataSource = call(container, "getDataSource");
         if (dataSource == null) {
@@ -873,7 +850,7 @@ public final class DataExportPlugin implements PluginEntry {
         }
 
         SchemaDiscovery discovery = new SchemaDiscovery(
-                path.dataSourceName, dataSource, monitor);
+                path.projectId, path.datasourceId, dataSource, monitor);
         SchemaNode target = discovery.resolve(path);
         Class<?> dataContainerClass =
                 c("org.jkiss.dbeaver.model.struct.DBSDataContainer");
@@ -1218,10 +1195,10 @@ public final class DataExportPlugin implements PluginEntry {
 
     private static String handleExecuteR(java.util.Map<String,String> q, String body)
             throws Exception {
-        String dataSourceName = q.get("ds");
-        if (dataSourceName == null || dataSourceName.isEmpty()) {
-            throw new IllegalArgumentException("missing ?ds=");
-        }
+        String projectId = q.get("projectId");
+        String datasourceId = q.get("dsId");
+        DBeaverWorkspace.requireId(projectId, "projectId");
+        DBeaverWorkspace.requireId(datasourceId, "dsId");
         int limit = boundedIntParam(
                 q, "limit", DEFAULT_ROWS_LIMIT, 1, MAX_ROWS_LIMIT);
         int configuredTimeout = Integer.getInteger(
@@ -1232,16 +1209,14 @@ public final class DataExportPlugin implements PluginEntry {
         int timeoutSeconds = boundedIntParam(
                 q, "timeout", configuredTimeout, 1, configuredTimeout);
 
-        String sql = extractJsonString(body, "sql");
+        String sql = JsonRequests.string(JsonRequests.parseObject(body), "sql", false);
         if (sql == null || sql.trim().isEmpty()) {
             throw new IllegalArgumentException(
                     "request body must contain a non-empty 'sql' string");
         }
 
-        Object container = findContainer(dataSourceName);
-        if (container == null) {
-            throw new HttpException(404, "data source not found");
-        }
+        Object container = DBeaverWorkspace.requireDatasource(
+                DBeaverWorkspace.requireProject(projectId), datasourceId);
         ensureConnected(container);
         Object dataSource = call(container, "getDataSource");
         if (dataSource == null) {
@@ -1676,20 +1651,6 @@ public final class DataExportPlugin implements PluginEntry {
 
     // -- Utilities ------------------------------------------------------------
 
-    private static List<Object> allContainers() throws Exception {
-        Object p = call(c("org.jkiss.dbeaver.runtime.DBWorkbench"), "getPlatform");
-        Object ws = call(p, "getWorkspace");
-        Object reg = call(((List<?>) call(ws, "getProjects")).get(0), "getDataSourceRegistry");
-        @SuppressWarnings("unchecked")
-        List<Object> r = (List<Object>) call(reg, "getDataSources");
-        return r;
-    }
-
-    private static Object findContainer(String name) throws Exception {
-        for (Object c : allContainers())
-            if (name.equals(call(c, "getName"))) return c;
-        return null;
-    }
 
     private static void respondR(Object ex, int code, String json) throws Exception {
         byte[] b = json.getBytes(StandardCharsets.UTF_8);
@@ -1708,16 +1669,20 @@ public final class DataExportPlugin implements PluginEntry {
         os.write(b); os.close();
     }
 
-    private static java.util.Map<String,String> queryParams(URI uri) {
-        java.util.Map<String,String> m = new java.util.LinkedHashMap<>();
-        String q = uri.getQuery();
-        if (q != null)
-            for (String p : q.split("&")) {
-                String[] kv = p.split("=", 2);
-                m.put(kv[0], kv.length > 1
-                        ? java.net.URLDecoder.decode(kv[1], StandardCharsets.UTF_8) : "");
+    static java.util.Map<String,String> queryParams(URI uri) {
+        java.util.Map<String,String> parameters = new java.util.LinkedHashMap<>();
+        String query = uri.getRawQuery();
+        if (query != null) {
+            for (String part : query.split("&")) {
+                String[] pair = part.split("=", 2);
+                parameters.put(
+                        java.net.URLDecoder.decode(pair[0], StandardCharsets.UTF_8),
+                        pair.length > 1
+                                ? java.net.URLDecoder.decode(pair[1], StandardCharsets.UTF_8)
+                                : "");
             }
-        return m;
+        }
+        return parameters;
     }
 
     private static int intParam(java.util.Map<String,String> q, String key, int def) {
@@ -1956,196 +1921,6 @@ public final class DataExportPlugin implements PluginEntry {
                 + (m != null ? m : "null")) + "}";
     }
 
-    private static String extractJsonString(String body, String targetKey) {
-        if (body == null) {
-            throw new IllegalArgumentException("request body must be JSON");
-        }
-        int index = skipJsonWhitespace(body, 0);
-        if (index >= body.length() || body.charAt(index) != '{') {
-            throw new IllegalArgumentException(
-                    "request body must be a JSON object");
-        }
-        index++;
-
-        boolean found = false;
-        String result = null;
-        while (true) {
-            index = skipJsonWhitespace(body, index);
-            if (index >= body.length()) {
-                throw new IllegalArgumentException("unterminated JSON object");
-            }
-            if (body.charAt(index) == '}') {
-                index = skipJsonWhitespace(body, index + 1);
-                if (index != body.length()) {
-                    throw new IllegalArgumentException(
-                            "unexpected content after JSON object");
-                }
-                return found ? result : null;
-            }
-
-            ParsedJsonString property = parseJsonString(body, index);
-            index = skipJsonWhitespace(body, property.nextIndex);
-            if (index >= body.length() || body.charAt(index) != ':') {
-                throw new IllegalArgumentException(
-                        "expected ':' after JSON property");
-            }
-            index = skipJsonWhitespace(body, index + 1);
-
-            if (targetKey.equals(property.value)) {
-                if (found) {
-                    throw new IllegalArgumentException(
-                            "duplicate JSON property: " + targetKey);
-                }
-                found = true;
-                if (index < body.length() && body.charAt(index) == '"') {
-                    ParsedJsonString value = parseJsonString(body, index);
-                    result = value.value;
-                    index = value.nextIndex;
-                } else if (body.startsWith("null", index)) {
-                    result = null;
-                    index += 4;
-                } else {
-                    throw new IllegalArgumentException(
-                            "'" + targetKey + "' must be a JSON string");
-                }
-            } else {
-                index = skipJsonValue(body, index);
-            }
-
-            index = skipJsonWhitespace(body, index);
-            if (index >= body.length()) {
-                throw new IllegalArgumentException("unterminated JSON object");
-            }
-            char separator = body.charAt(index);
-            if (separator == ',') {
-                index = skipJsonWhitespace(body, index + 1);
-                if (index >= body.length() || body.charAt(index) == '}') {
-                    throw new IllegalArgumentException(
-                            "trailing comma in JSON object");
-                }
-            } else if (separator != '}') {
-                throw new IllegalArgumentException(
-                        "expected ',' or '}' in JSON object");
-            }
-        }
-    }
-
-    private static int skipJsonValue(String json, int index) {
-        if (index >= json.length()) {
-            throw new IllegalArgumentException("missing JSON value");
-        }
-        char first = json.charAt(index);
-        if (first == '"') return parseJsonString(json, index).nextIndex;
-        if (first == '{' || first == '[') {
-            java.util.ArrayDeque<Character> nesting =
-                    new java.util.ArrayDeque<>();
-            nesting.push(first == '{' ? '}' : ']');
-            for (int i = index + 1; i < json.length(); i++) {
-                char ch = json.charAt(i);
-                if (ch == '"') {
-                    i = parseJsonString(json, i).nextIndex - 1;
-                } else if (ch == '{') {
-                    nesting.push('}');
-                } else if (ch == '[') {
-                    nesting.push(']');
-                } else if (ch == '}' || ch == ']') {
-                    if (nesting.isEmpty() || nesting.pop() != ch) {
-                        throw new IllegalArgumentException(
-                                "mismatched JSON delimiter");
-                    }
-                    if (nesting.isEmpty()) return i + 1;
-                }
-            }
-            throw new IllegalArgumentException(
-                    "unterminated nested JSON value");
-        }
-
-        int end = index;
-        while (end < json.length()) {
-            char ch = json.charAt(end);
-            if (ch == ',' || ch == '}' || Character.isWhitespace(ch)) break;
-            end++;
-        }
-        if (end == index) {
-            throw new IllegalArgumentException("missing JSON value");
-        }
-        return end;
-    }
-
-    private static int skipJsonWhitespace(String json, int index) {
-        while (index < json.length()
-                && Character.isWhitespace(json.charAt(index))) {
-            index++;
-        }
-        return index;
-    }
-
-    private static ParsedJsonString parseJsonString(
-            String json, int index) {
-        if (index >= json.length() || json.charAt(index) != '"') {
-            throw new IllegalArgumentException("expected JSON string");
-        }
-        StringBuilder value = new StringBuilder();
-        for (int i = index + 1; i < json.length(); i++) {
-            char ch = json.charAt(i);
-            if (ch == '"') {
-                return new ParsedJsonString(value.toString(), i + 1);
-            }
-            if (ch < 0x20) {
-                throw new IllegalArgumentException(
-                        "unescaped control character in JSON string");
-            }
-            if (ch != '\\') {
-                value.append(ch);
-                continue;
-            }
-            if (++i >= json.length()) {
-                throw new IllegalArgumentException(
-                        "unterminated JSON escape");
-            }
-            char escape = json.charAt(i);
-            switch (escape) {
-                case '"': value.append('"'); break;
-                case '\\': value.append('\\'); break;
-                case '/': value.append('/'); break;
-                case 'b': value.append('\b'); break;
-                case 'f': value.append('\f'); break;
-                case 'n': value.append('\n'); break;
-                case 'r': value.append('\r'); break;
-                case 't': value.append('\t'); break;
-                case 'u':
-                    if (i + 4 >= json.length()) {
-                        throw new IllegalArgumentException(
-                                "incomplete JSON unicode escape");
-                    }
-                    int codePoint;
-                    try {
-                        codePoint = Integer.parseInt(
-                                json.substring(i + 1, i + 5), 16);
-                    } catch (NumberFormatException e) {
-                        throw new IllegalArgumentException(
-                                "invalid JSON unicode escape");
-                    }
-                    value.append((char) codePoint);
-                    i += 4;
-                    break;
-                default:
-                    throw new IllegalArgumentException(
-                            "invalid JSON escape: \\" + escape);
-            }
-        }
-        throw new IllegalArgumentException("unterminated JSON string");
-    }
-
-    private static final class ParsedJsonString {
-        private final String value;
-        private final int nextIndex;
-
-        private ParsedJsonString(String value, int nextIndex) {
-            this.value = value;
-            this.nextIndex = nextIndex;
-        }
-    }
 
     private static String readUtf8Body(
             InputStream input, int maxBytes) throws Exception {
@@ -2162,7 +1937,14 @@ public final class DataExportPlugin implements PluginEntry {
             }
             bytes.write(buffer, 0, count);
         }
-        return new String(bytes.toByteArray(), StandardCharsets.UTF_8);
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes.toByteArray())).toString();
+        } catch (java.nio.charset.CharacterCodingException e) {
+            throw new IllegalArgumentException("request body must be valid UTF-8");
+        }
     }
 
     private static boolean isView(Object o) {
@@ -2280,8 +2062,7 @@ public final class DataExportPlugin implements PluginEntry {
         return createMonitorProxy(container, Long.MAX_VALUE);
     }
 
-    private static Object createMonitorProxy(
-            Object container, long deadlineNanos) {
+    static Object createMonitorProxy(Object container, long deadlineNanos) {
         try {
             for (Method m : container.getClass().getMethods())
                 if (m.getName().equals("connect") && m.getParameterCount() == 3)
@@ -2319,7 +2100,7 @@ public final class DataExportPlugin implements PluginEntry {
         return null;
     }
 
-    private static Class<?> c(String name) throws Exception {
+    static Class<?> c(String name) throws Exception {
         ClassLoader cl = dbeaverClassLoader;
         while (cl != null) {
             try { return Class.forName(name, true, cl); }
@@ -2329,28 +2110,56 @@ public final class DataExportPlugin implements PluginEntry {
         return Class.forName(name);
     }
 
-    private static Class<?> providerClass(Object anchor, String name)
+    static Class<?> providerClass(Object anchor, String name)
             throws Exception {
         return Class.forName(
                 name, true, anchor.getClass().getClassLoader());
     }
 
-    private static Object call(Object t, String method) throws Exception {
+    static Object call(Object t, String method) throws Exception {
         Class<?> o = (t instanceof Class) ? (Class<?>) t : t.getClass();
-        return o.getMethod(method).invoke(t instanceof Class ? null : t);
+        Method member = publicContractMethod(o, o.getMethod(method));
+        return member.invoke(t instanceof Class ? null : t);
     }
 
-    private static Object call(Object t, String method, Object[] args) throws Exception {
+    static Object call(Object t, String method, Object[] args) throws Exception {
         Class<?> o = (t instanceof Class) ? (Class<?>) t : t.getClass();
         for (Method m : o.getMethods())
             if (m.getName().equals(method)
                     && m.getParameterCount() == args.length
                     && parametersCompatible(m.getParameterTypes(), args))
-                return m.invoke(t instanceof Class ? null : t, args);
+                return publicContractMethod(o, m).invoke(t instanceof Class ? null : t, args);
         throw new NoSuchMethodException(method);
     }
 
-    private static Object construct(Class<?> type, Object... args)
+    private static Method publicContractMethod(Class<?> type, Method method) {
+        if (java.lang.reflect.Modifier.isPublic(method.getDeclaringClass().getModifiers())) {
+            return method;
+        }
+        Method contract = findPublicMethod(type, method.getName(), method.getParameterTypes());
+        return contract != null ? contract : method;
+    }
+
+    private static Method findPublicMethod(
+            Class<?> type, String name, Class<?>[] parameterTypes) {
+        if (java.lang.reflect.Modifier.isPublic(type.getModifiers())) {
+            try {
+                Method method = type.getMethod(name, parameterTypes);
+                if (java.lang.reflect.Modifier.isPublic(
+                        method.getDeclaringClass().getModifiers())) return method;
+            } catch (NoSuchMethodException absent) {
+                // This public contract does not declare the requested method.
+            }
+        }
+        for (Class<?> contract : type.getInterfaces()) {
+            Method method = findPublicMethod(contract, name, parameterTypes);
+            if (method != null) return method;
+        }
+        Class<?> parent = type.getSuperclass();
+        return parent == null ? null : findPublicMethod(parent, name, parameterTypes);
+    }
+
+    static Object construct(Class<?> type, Object... args)
             throws Exception {
         for (java.lang.reflect.Constructor<?> constructor
                 : type.getConstructors()) {
@@ -2392,5 +2201,5 @@ public final class DataExportPlugin implements PluginEntry {
         return primitive;
     }
 
-    private static Object[] arr(Object... vals) { return vals; }
+    static Object[] arr(Object... vals) { return vals; }
 }
