@@ -7,29 +7,30 @@ description: Operate project-qualified DBeaver data sources through the local da
 
 Use `scripts/dbeaver_api.py` for every API call. Database credentials stay in
 DBeaver: never ask for, enter into an API request, print, copy, or capture a
-username, password, token, credential-bearing URL, or authentication secret.
+username, password, provider authentication token, credential-bearing URL, or
+authentication secret.
 Guided create/edit flows open DBeaver's native UI so the user can select the
 project, review settings, enter credentials, and complete any required native
 interaction.
 
 ## Access and target selection
 
-Set `DBEAVER_DATA_API_TOKEN_FILE` to the local token-file path or pass
-`--api-token-file <path>` before a command. A token is required for `projects`,
-`drivers`, and connection administration/operation-status commands. A friendly
-`--project <name>` is resolved through authenticated `/projects`; a known
-`--project-id` is passed directly. Datasource names resolve through the
-unauthenticated `/datasources?projectId=...` route. The client never sends a
-bearer token to legacy data routes.
-Never put token contents on a command line. The client sends the token only to
-a loopback IP URL and does not follow administrative redirects. See
-[references/api.md](references/api.md) for secure token setup.
+The API has no plugin-managed authentication; the server listens on
+`http://127.0.0.1:8765` by default. The bundled client accepts only loopback IP
+URLs, never follows redirects, and disables environment proxies. Use
+`--base-url` or `DBEAVER_DATA_API_URL` only to select a loopback destination.
+Friendly project names resolve through `/projects`; a known `--project-id` is
+passed directly. Datasource names resolve through
+`/datasources?projectId=...`. All routes are unauthenticated at the plugin
+level. The existing `Origin` rejection applies only to project/driver
+discovery, datasource create/inspect/edit/test, and connection-operation
+status routes; the client itself sends no `Origin`. See
+[references/api.md](references/api.md) for the complete HTTP contract.
 
-From PowerShell, set the paths once (the token variable contains a **path**):
+From PowerShell, set the client path once:
 
 ```powershell
 $dbApi = ".\skills\dbeaver-database-operator\scripts\dbeaver_api.py"
-$tokenFile = $env:DBEAVER_DATA_API_TOKEN_FILE
 ```
 
 Choose an exact project name or native ID with `--project` or `--project-id`.
@@ -40,7 +41,8 @@ looked up within the selected native project; an ambiguous/missing target
 fails before a mutation is submitted. Native IDs are sent directly without
 fallback to the active or first project; creation verifies the selected
 project's existence and writability before POST. `rows` follows a schema node
-ID, which already encodes both native IDs.
+ID, which already encodes both native IDs. Protected projects retain DBeaver's
+native unlock flow; complete it in DBeaver.
 
 The workspace's `activeProjectId` is only the currently active workspace
 project; it does **not** guarantee that a native wizard selected the same
@@ -55,9 +57,9 @@ constructing the wizard. Do not substitute the UI's existing active project.
 1. Discover projects and select the intended writable project by ID:
 
    ```powershell
-   python $dbApi --api-token-file $tokenFile projects
+   python $dbApi projects
    python $dbApi datasources --project-id "<project-id>"
-   python $dbApi --api-token-file $tokenFile drivers --project-id "<project-id>"
+   python $dbApi drivers --project-id "<project-id>"
    ```
 
    Driver discovery reports drivers enabled in the running DBeaver instance.
@@ -86,9 +88,9 @@ constructing the wizard. Do not substitute the UI's existing active project.
    ```
 
    ```powershell
-   python $dbApi --api-token-file $tokenFile create-connection `
+   python $dbApi create-connection `
      --project-id "<project-id>" --request-file "connection-request.json"
-   python $dbApi --api-token-file $tokenFile connection-operation `
+   python $dbApi connection-operation `
      --id "<operation-id>" --wait --wait-timeout 300
    ```
 
@@ -105,7 +107,7 @@ constructing the wizard. Do not substitute the UI's existing active project.
    a connected flag proves that a fresh connection test passed.
 
    ```powershell
-   python $dbApi --api-token-file $tokenFile inspect-connection `
+   python $dbApi inspect-connection `
      --project-id "<project-id>" --ds-id "<datasource-id>"
    ```
 
@@ -120,9 +122,9 @@ constructing the wizard. Do not substitute the UI's existing active project.
 4. Test the saved profile using DBeaver's real native connection/session path:
 
    ```powershell
-   python $dbApi --api-token-file $tokenFile test-connection `
+   python $dbApi test-connection `
      --project-id "<project-id>" --ds-id "<datasource-id>"
-   python $dbApi --api-token-file $tokenFile connection-operation `
+   python $dbApi connection-operation `
      --id "<test-operation-id>" --wait --wait-timeout 300
    ```
 
@@ -158,10 +160,10 @@ constructing the wizard. Do not substitute the UI's existing active project.
    ```
 
    ```powershell
-   python $dbApi --api-token-file $tokenFile edit-connection `
+   python $dbApi edit-connection `
      --project-id "<project-id>" --ds-id "<datasource-id>" `
      --request-file "connection-edit.json"
-   python $dbApi --api-token-file $tokenFile connection-operation `
+   python $dbApi connection-operation `
      --id "<edit-operation-id>" --wait --wait-timeout 300
    ```
 

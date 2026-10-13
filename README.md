@@ -2,7 +2,7 @@
 
 A ja-netfilter instrumentation plugin exposing a running DBeaver instance through a loopback JSON API at `http://127.0.0.1:8765` by default. It is not a conventional DBeaver/Eclipse extension. The API scopes projects and datasources by native IDs, supports schema/row access and provider SQL, and provides user-mediated native connection create/edit/test operations. `/execute` supports DML and DDL and is not read-only.
 
-Database credentials stay in DBeaver. Never put credentials, token contents, usernames, passwords, or credential-bearing URLs in API requests or command lines. Administrative routes require a local protected token file; the client sends its token only to loopback IP URLs. Read [the database operator skill](skills/dbeaver-database-operator/SKILL.md) for operational and safety guidance and [the API reference](skills/dbeaver-database-operator/references/api.md) for endpoint/token details.
+Breaking change: plugin-managed API-token configuration and the CLI token-file option have been removed; there is no compatibility alias. The API has no plugin-managed authentication and remains bound to `127.0.0.1`; the client accepts only loopback IP URLs, never follows redirects, and ignores environment proxies. Database credentials stay in DBeaver: never put credentials, provider authentication tokens, usernames, passwords, or credential-bearing URLs in API requests or command lines. The existing administrative `Origin` rejection remains limited to discovery, connection-management, and operation-status routes. Read [the database operator skill](skills/dbeaver-database-operator/SKILL.md) for operational and safety guidance and [the API reference](skills/dbeaver-database-operator/references/api.md) for endpoint details.
 
 ## Standalone build
 

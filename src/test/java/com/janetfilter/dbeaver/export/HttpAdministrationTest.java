@@ -4,7 +4,6 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
@@ -14,16 +13,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.attribute.AclEntry;
-import java.nio.file.attribute.AclEntryPermission;
-import java.nio.file.attribute.AclEntryType;
-import java.nio.file.attribute.AclFileAttributeView;
-import java.nio.file.attribute.PosixFileAttributeView;
-import java.nio.file.attribute.PosixFilePermission;
-import java.util.Collections;
-import java.util.EnumSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -31,39 +20,16 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 
 public class HttpAdministrationTest {
-    private static final String TOKEN = "http-boundary-test-token-not-a-database-secret";
-    private static Path tokenFile;
     private static Object server;
     private static ExecutorService workers;
     private static String baseUrl;
     private static String originalPort;
-    private static String originalTokenFile;
     private static HttpClient client;
 
     @BeforeClass
     public static void start() throws Exception {
         originalPort = System.getProperty("janf.dataExport.port");
-        originalTokenFile = System.getProperty("janf.dataExport.authTokenFile");
-        tokenFile = Files.createTempFile("janf-http-boundary-", ".token");
-        Files.write(tokenFile, TOKEN.getBytes(StandardCharsets.UTF_8));
-        PosixFileAttributeView posix = Files.getFileAttributeView(
-                tokenFile, PosixFileAttributeView.class);
-        if (posix != null) {
-            posix.setPermissions(EnumSet.of(
-                    PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE));
-        } else {
-            AclFileAttributeView acl = Files.getFileAttributeView(
-                    tokenFile, AclFileAttributeView.class);
-            if (acl != null) {
-                acl.setAcl(Collections.singletonList(AclEntry.newBuilder()
-                        .setType(AclEntryType.ALLOW)
-                        .setPrincipal(Files.getOwner(tokenFile))
-                        .setPermissions(EnumSet.allOf(AclEntryPermission.class))
-                        .build()));
-            }
-        }
         System.setProperty("janf.dataExport.port", "0");
-        System.setProperty("janf.dataExport.authTokenFile", tokenFile.toString());
         new DataExportPlugin().init(null, null);
         workers = Executors.newFixedThreadPool(4);
         field("executor").set(null, workers);
@@ -93,41 +59,23 @@ public class HttpAdministrationTest {
             if (workers != null) workers.shutdownNow();
             client = null;
             restore("janf.dataExport.port", originalPort);
-            restore("janf.dataExport.authTokenFile", originalTokenFile);
-            if (tokenFile != null) Files.deleteIfExists(tokenFile);
         }
     }
 
-    @Test
-    public void administrationRequiresAuthorizationBeforeProviderAccess() throws Exception {
-        for (String path : new String[] {
-                "/projects", "/drivers", "/datasources/profile?projectId=p",
-                "/connection-operations/unknown"
-        }) {
-            assertEquals(401, request("GET", path, null, null, null, null).status);
-        }
-        for (String path : new String[] {
-                "/datasources", "/datasources/profile/edit?projectId=p",
-                "/datasources/profile/test?projectId=p"
-        }) {
-            assertEquals(401, request("POST", path, "Bearer wrong", null,
-                    "application/json", bytes("{}")).status);
-        }
-    }
 
     @Test
-    public void browserOriginsAreRejectedEvenWithValidAuthorization() throws Exception {
+    public void browserOriginsAreRejected() throws Exception {
         for (String path : new String[] {
                 "/projects", "/drivers", "/datasources/profile?projectId=p"
         }) {
-            assertEquals(403, request("GET", path, bearer(),
+            assertEquals(403, request("GET", path,
                     "https://untrusted.example", null, null).status);
         }
         for (String path : new String[] {
                 "/datasources/profile/edit?projectId=p",
                 "/datasources/profile/test?projectId=p"
         }) {
-            assertEquals(403, request("POST", path, bearer(),
+            assertEquals(403, request("POST", path,
                     "https://untrusted.example", "application/json", bytes("{}")).status);
         }
     }
@@ -138,59 +86,57 @@ public class HttpAdministrationTest {
                 "/datasources", "/datasources/profile/edit?projectId=p",
                 "/datasources/profile/test?projectId=p"
         }) {
-            assertEquals(415, request("POST", path, "bEaReR " + TOKEN, null,
-                    "text/plain", bytes("{}")).status);
+            assertEquals(415, request("POST", path, null, "text/plain", bytes("{}")).status);
         }
     }
 
     @Test
     public void malformedAdministrativeJsonDoesNotEchoPayloads() throws Exception {
         String privateValue = "do-not-echo-this-request-value";
-        Response response = request("POST", "/datasources", bearer(), null,
+        Response response = request("POST", "/datasources", null,
                 "application/json; charset=utf-8", bytes(
                         "{\"value\":\"" + privateValue + "\",\"ignored\":invalid}"));
         assertEquals(400, response.status);
         assertFalse(response.body.contains(privateValue));
-        assertFalse(response.body.contains(TOKEN));
     }
 
     @Test
     public void creationBodyLimitIsEnforced() throws Exception {
         byte[] body = new byte[1024 * 1024 + 1];
         java.util.Arrays.fill(body, (byte) ' ');
-        assertEquals(413, request("POST", "/datasources", bearer(), null,
+        assertEquals(413, request("POST", "/datasources", null,
                 "application/json", body).status);
     }
 
     @Test
     public void missingOperationHasSpecificStatus() throws Exception {
         assertEquals(404, request("GET", "/connection-operations/not-an-operation",
-                bearer(), null, null, null).status);
+                null, null, null).status);
     }
 
     @Test
     public void datasourceAndOperationMethodsAreEnforced() throws Exception {
-        assertEquals(405, request("DELETE", "/datasources", null, null, null, null).status);
+        assertEquals(405, request("DELETE", "/datasources", null, null, null).status);
         assertEquals(405, request("POST", "/connection-operations/unknown",
-                bearer(), null, "application/json", bytes("{}" )).status);
-        assertEquals(405, request("GET", "/execute", null, null, null, null).status);
-        assertEquals(405, request("POST", "/projects", bearer(), null,
+                null, "application/json", bytes("{}" )).status);
+        assertEquals(405, request("GET", "/execute", null, null, null).status);
+        assertEquals(405, request("POST", "/projects", null,
                 "application/json", bytes("{}")).status);
-        assertEquals(405, request("POST", "/datasources/profile?projectId=p", bearer(), null,
+        assertEquals(405, request("POST", "/datasources/profile?projectId=p", null,
                 "application/json", bytes("{}")).status);
         assertEquals(405, request("GET", "/datasources/profile/edit?projectId=p",
-                bearer(), null, null, null).status);
+                null, null, null).status);
         assertEquals(405, request("GET", "/datasources/profile/test?projectId=p",
-                bearer(), null, null, null).status);
-        assertEquals(405, request("POST", "/schema", null, null,
+                null, null, null).status);
+        assertEquals(405, request("POST", "/schema", null,
                 "application/json", bytes("{}")).status);
-        assertEquals(405, request("POST", "/rows", null, null,
+        assertEquals(405, request("POST", "/rows", null,
                 "application/json", bytes("{}")).status);
     }
 
     @Test
     public void executeRejectsMalformedIgnoredValuesBeforeDatasourceLookup() throws Exception {
-        assertEquals(400, request("POST", "/execute?projectId=p&dsId=unused", null, null,
+        assertEquals(400, request("POST", "/execute?projectId=p&dsId=unused", null,
                 "application/json", bytes(
                         "{\"sql\":\"SELECT 1\",\"ignored\":invalid}")).status);
     }
@@ -199,28 +145,27 @@ public class HttpAdministrationTest {
     public void invalidUtf8CannotSilentlyChangeSqlText() throws Exception {
         byte[] body = bytes("{\"sql\":\"SELECT 1\"}");
         body[10] = (byte) 0xff;
-        assertEquals(400, request("POST", "/execute?projectId=p&dsId=unused", null, null,
+        assertEquals(400, request("POST", "/execute?projectId=p&dsId=unused", null,
                 "application/json", body).status);
     }
 
     @Test
     public void dataSelectorsCannotFallBackToFirstProjectOrDatasourceName() throws Exception {
-        assertEquals(400, request("GET", "/datasources", null, null, null, null).status);
+        assertEquals(400, request("GET", "/datasources", null, null, null).status);
         assertEquals(400, request("GET", "/schema?projectId=p&ds=legacy-name",
-                null, null, null, null).status);
+                null, null, null).status);
         assertEquals(400, request("POST", "/execute?projectId=p&ds=legacy-name",
-                null, null, "application/json", bytes("{\"sql\":\"SELECT 1\"}")).status);
+                null, "application/json", bytes("{\"sql\":\"SELECT 1\"}")).status);
     }
 
-    private static Response request(String method, String path, String authorization,
-                                    String origin, String contentType, byte[] body)
+    private static Response request(String method, String path, String origin,
+                                    String contentType, byte[] body)
             throws Exception {
         HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(baseUrl + path))
                 .timeout(Duration.ofSeconds(5))
                 .method(method, body == null
                         ? HttpRequest.BodyPublishers.noBody()
                         : HttpRequest.BodyPublishers.ofByteArray(body));
-        if (authorization != null) request.header("Authorization", authorization);
         if (origin != null) request.header("Origin", origin);
         if (contentType != null) request.header("Content-Type", contentType);
         HttpResponse<String> response = client.send(request.build(),
@@ -228,9 +173,6 @@ public class HttpAdministrationTest {
         return new Response(response.statusCode(), response.body());
     }
 
-    private static String bearer() {
-        return "Bearer " + TOKEN;
-    }
 
     private static byte[] bytes(String value) {
         return value.getBytes(StandardCharsets.UTF_8);

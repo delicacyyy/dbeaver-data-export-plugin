@@ -35,7 +35,6 @@ public final class DataExportPlugin implements PluginEntry {
     private static final int DEFAULT_ROWS_TIMEOUT_SECONDS = 30;
     private static final int DEFAULT_EXECUTE_TIMEOUT_SECONDS = 30;
     private static final int MAX_EXECUTE_BODY_BYTES = 1024 * 1024;
-    private static CreationAccess creationAccess;
     private static volatile ClassLoader dbeaverClassLoader;
     private static final AtomicBoolean started = new AtomicBoolean(false);
     private static int port;
@@ -50,7 +49,6 @@ public final class DataExportPlugin implements PluginEntry {
 
     @Override public void init(Environment env, PluginConfig config) {
         port = Integer.getInteger(PORT_PROPERTY, DEFAULT_PORT);
-        creationAccess = CreationAccess.load();
     }
 
     @Override public List<MyTransformer> getTransformers() {
@@ -116,8 +114,9 @@ public final class DataExportPlugin implements PluginEntry {
                     || path.startsWith("/datasources/")
                     || ("/datasources".equals(path) && "POST".equalsIgnoreCase(method));
             if (administrative) {
-                creationAccess.require(
-                        requestHeader(ex, "Authorization"), requestHeader(ex, "Origin"));
+                if (requestHeader(ex, "Origin") != null) {
+                    throw new HttpException(403, "Origin is not allowed");
+                }
                 Map<String, String> query = queryParams(uri);
                 if ("/projects".equals(path)) {
                     requireMethod(method, "GET");

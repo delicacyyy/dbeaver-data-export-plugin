@@ -48,9 +48,6 @@ class ResponseServer:
                     {
                         "method": self.command,
                         "path": self.path,
-                        "authorization": self.headers.get("Authorization"),
-                        "origin": self.headers.get("Origin"),
-                        "content_type": self.headers.get("Content-Type"),
                         "body": body,
                     }
                 )
@@ -90,9 +87,9 @@ class ResponseServer:
         self.thread.join()
 
 
-def parse_args(server_url: str, token_file: Path, *command: str):
+def parse_args(server_url: str, *command: str):
     return dbeaver_api.build_parser().parse_args(
-        ["--base-url", server_url, "--api-token-file", str(token_file), *command]
+        ["--base-url", server_url, *command]
     )
 
 
@@ -134,8 +131,6 @@ class DBeaverApiClientTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.directory = Path(self.temp.name)
-        self.token_file = self.directory / "api-token"
-        self.token_file.write_bytes(b"test-token._~+/==\r\n")
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -161,7 +156,6 @@ class DBeaverApiClientTests(unittest.TestCase):
                 with ResponseServer() as server:
                     args = parse_args(
                         server.url,
-                        self.token_file,
                         "create-connection",
                         "--project-id", "project-1",
                         "--request-file", str(request_file),
@@ -184,7 +178,7 @@ class DBeaverApiClientTests(unittest.TestCase):
         )
         with ResponseServer(routes=routes) as server:
             args = parse_args(
-                server.url, self.token_file, "create-connection",
+                server.url, "create-connection",
                 "--project-id", "project-1", "--request-file", str(request_file),
             )
             result = dbeaver_api.run(args)
@@ -196,8 +190,6 @@ class DBeaverApiClientTests(unittest.TestCase):
         self.assertEqual(payload["connection"]["port"], decimal(numeric))
         self.assertNotEqual(payload["connection"]["port"], decimal("5432"))
         self.assertEqual(payload["projectId"], "project-1")
-        self.assertEqual(post["authorization"], "Bearer test-token._~+/==")
-        self.assertIsNone(post["origin"])
 
         same_project_source = (
             '{ "projectId" : "project-1", "mode":"guided", '
@@ -207,7 +199,7 @@ class DBeaverApiClientTests(unittest.TestCase):
         same_project_file = self.write_request(same_project_source, "same-project.json")
         with ResponseServer(routes=routes) as server:
             args = parse_args(
-                server.url, self.token_file, "create-connection",
+                server.url, "create-connection",
                 "--project-id", "project-1", "--request-file", str(same_project_file),
             )
             dbeaver_api.run(args)
@@ -225,7 +217,7 @@ class DBeaverApiClientTests(unittest.TestCase):
         )
         with ResponseServer(routes=target_routes()) as server:
             args = parse_args(
-                server.url, self.token_file, "create-connection",
+                server.url, "create-connection",
                 "--project-id", "project-1", "--request-file", str(request_file),
             )
             with self.assertRaisesRegex(dbeaver_api.ApiError, "does not match"):
@@ -251,7 +243,7 @@ class DBeaverApiClientTests(unittest.TestCase):
             ("POST", "/datasources"): (201, response),
         }) as server:
             args = parse_args(
-                server.url, self.token_file, "create-connection", "--project-id", "project-1",
+                server.url, "create-connection", "--project-id", "project-1",
                 "--request-file", str(request_file),
             )
             self.assertTrue(dbeaver_api.run(args)["saved"])
@@ -264,7 +256,7 @@ class DBeaverApiClientTests(unittest.TestCase):
             ("POST", "/datasources"): (201, invalid),
         }) as server:
             args = parse_args(
-                server.url, self.token_file, "create-connection", "--project-id", "project-1",
+                server.url, "create-connection", "--project-id", "project-1",
                 "--request-file", str(request_file),
             )
             with self.assertRaises(dbeaver_api.ApiError):
@@ -280,7 +272,7 @@ class DBeaverApiClientTests(unittest.TestCase):
         )
         with ResponseServer(routes=routes) as server:
             args = parse_args(
-                server.url, self.token_file, "create-connection", "--project", "Development",
+                server.url, "create-connection", "--project", "Development",
                 "--request-file", str(request_file),
             )
             with self.assertRaisesRegex(dbeaver_api.ApiError, "Ambiguous"):
@@ -293,7 +285,7 @@ class DBeaverApiClientTests(unittest.TestCase):
         routes = target_routes(datasource_items=repeated)
         with ResponseServer(routes=routes) as server:
             args = parse_args(
-                server.url, self.token_file, "test-connection", "--project-id", "project-1",
+                server.url, "test-connection", "--project-id", "project-1",
                 "--ds", "Warehouse",
             )
             with self.assertRaisesRegex(dbeaver_api.ApiError, "Ambiguous"):
@@ -302,7 +294,7 @@ class DBeaverApiClientTests(unittest.TestCase):
 
         with ResponseServer(routes=target_routes()) as server:
             args = parse_args(
-                server.url, self.token_file, "edit-connection", "--project-id", "project-1",
+                server.url, "edit-connection", "--project-id", "project-1",
                 "--ds-id", "other-project-ds", "--request-file",
                 str(self.write_request('{"name":"renamed"}', "edit.json")),
             )
@@ -316,34 +308,6 @@ class DBeaverApiClientTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             dbeaver_api.build_parser().parse_args(["schema", "--ds", "Warehouse"])
 
-    def test_schema_and_execute_send_native_ids_but_no_admin_token_to_data_routes(self):
-        routes = target_routes()
-        routes[("GET", "/schema")] = (200, {"items": []})
-        routes[("POST", "/execute")] = (200, {"resultKind": "rows", "records": []})
-        with ResponseServer(routes=routes) as server:
-            schema = parse_args(
-                server.url, self.directory / "missing-token", "schema", "--project-id", "project-1",
-                "--ds-id", "ds-1",
-            )
-            self.assertEqual(dbeaver_api.run(schema), {"items": []})
-            execute = parse_args(
-                server.url, self.token_file, "execute", "--project", "Development",
-                "--ds", "Warehouse", "--sql", "SELECT 1 AS ok",
-            )
-            dbeaver_api.run(execute)
-        schema_request = next(r for r in server.requests if r["path"].startswith("/schema"))
-        execute_request = next(r for r in server.requests if r["path"].startswith("/execute"))
-        self.assertEqual(parse_qs(urlsplit(schema_request["path"]).query),
-                         {"projectId": ["project-1"], "dsId": ["ds-1"]})
-        self.assertEqual(parse_qs(urlsplit(execute_request["path"]).query)["dsId"], ["ds-1"])
-        self.assertIsNone(schema_request["authorization"])
-        self.assertIsNone(execute_request["authorization"])
-        datasource_request = next(r for r in server.requests if r["path"].startswith("/datasources"))
-        self.assertIsNone(datasource_request["authorization"])
-        self.assertEqual(parse_qs(urlsplit(datasource_request["path"]).query),
-                         {"projectId": ["project-1"]})
-        project_request = next(r for r in server.requests if urlsplit(r["path"]).path == "/projects")
-        self.assertEqual(project_request["authorization"], "Bearer test-token._~+/==")
 
     def test_inspection_is_project_qualified_and_requires_safe_identity(self):
         routes = target_routes()
@@ -354,13 +318,12 @@ class DBeaverApiClientTests(unittest.TestCase):
         )
         with ResponseServer(routes=routes) as server:
             args = parse_args(
-                server.url, self.token_file, "inspect-connection", "--project-id", "project-1",
+                server.url, "inspect-connection", "--project-id", "project-1",
                 "--ds-id", "ds-1",
             )
             result = dbeaver_api.run(args)
         inspect = next(r for r in server.requests if r["path"].startswith("/datasources/ds-1"))
         self.assertEqual(parse_qs(urlsplit(inspect["path"]).query), {"projectId": ["project-1"]})
-        self.assertEqual(inspect["authorization"], "Bearer test-token._~+/==")
         self.assertTrue(result["saved"])
         self.assertFalse(result["connected"])
 
@@ -373,43 +336,11 @@ class DBeaverApiClientTests(unittest.TestCase):
         )
         with ResponseServer(routes=routes) as server:
             args = parse_args(
-                server.url, self.token_file, "inspect-connection",
+                server.url, "inspect-connection",
                 "--project-id", "project-1", "--ds-id", "ds-1",
             )
             with self.assertRaisesRegex(dbeaver_api.ApiError, "wrong-target"):
                 dbeaver_api.run(args)
-
-    def test_edit_and_test_are_single_admin_posts_with_accurate_bodies(self):
-        routes = target_routes()
-        routes[("POST", "/datasources/ds-1/edit")] = (
-            202, {"operationId": "edit-1", "kind": "edit", "state": "queued"}
-        )
-        routes[("POST", "/datasources/ds-1/test")] = (
-            202, {"operationId": "test-1", "kind": "test", "state": "queued"}
-        )
-        edit_file = self.write_request('{"name":"New name","connection":{"database":"admin"}}', "edit.json")
-        with ResponseServer(routes=routes) as server:
-            edit = parse_args(
-                server.url, self.token_file, "edit-connection", "--project-id", "project-1",
-                "--ds-id", "ds-1", "--request-file", str(edit_file),
-            )
-            self.assertEqual(dbeaver_api.run(edit)["kind"], "edit")
-            test = parse_args(
-                server.url, self.token_file, "test-connection", "--project-id", "project-1",
-                "--ds-id", "ds-1",
-            )
-            self.assertEqual(dbeaver_api.run(test)["kind"], "test")
-            explicit_test = parse_args(
-                server.url, self.token_file, "test-connection", "--project-id", "project-1",
-                "--ds-id", "ds-1", "--timeout", "20",
-            )
-            dbeaver_api.run(explicit_test)
-        posts = [request for request in server.requests if request["method"] == "POST"]
-        self.assertEqual(len(posts), 3)
-        self.assertEqual(posts[0]["body"], edit_file.read_bytes())
-        self.assertEqual(json.loads(posts[1]["body"]), {})
-        self.assertEqual(json.loads(posts[2]["body"]), {"timeout": 20})
-        self.assertTrue(all(request["authorization"] == "Bearer test-token._~+/==" for request in posts))
 
     def test_operation_kinds_validate_completion_and_test_does_not_imply_connected(self):
         outcomes = (
@@ -431,7 +362,7 @@ class DBeaverApiClientTests(unittest.TestCase):
                     outcome["test"] = test
                 with ResponseServer(200, outcome) as server:
                     args = parse_args(
-                        server.url, self.token_file, "connection-operation", "--id", "op-1"
+                        server.url, "connection-operation", "--id", "op-1"
                     )
                     self.assertEqual(dbeaver_api.run(args), outcome)
 
@@ -442,7 +373,7 @@ class DBeaverApiClientTests(unittest.TestCase):
             "secret": "must-not-be-echoed",
         }
         with ResponseServer(200, contradictory) as server:
-            args = parse_args(server.url, self.token_file, "connection-operation", "--id", "op-1")
+            args = parse_args(server.url, "connection-operation", "--id", "op-1")
             with self.assertRaises(dbeaver_api.ApiError) as caught:
                 dbeaver_api.run(args)
         self.assertNotIn("secret", caught.exception.payload)
@@ -456,7 +387,7 @@ class DBeaverApiClientTests(unittest.TestCase):
             "diagnostic": {"category": "provider_configuration"},
         }
         with ResponseServer(200, failed_test) as server:
-            args = parse_args(server.url, self.token_file, "connection-operation", "--id", "op-1")
+            args = parse_args(server.url, "connection-operation", "--id", "op-1")
             with self.assertRaises(dbeaver_api.ApiError) as caught:
                 dbeaver_api.run(args)
         self.assertEqual(caught.exception.payload["test"]["passed"], False)
@@ -473,8 +404,7 @@ class DBeaverApiClientTests(unittest.TestCase):
             }
             with self.subTest(state=state), ResponseServer(200, response) as server:
                 argv = ["dbeaver_api.py", "--base-url", server.url,
-                        "--api-token-file", str(self.token_file), "connection-operation",
-                        "--id", "op-1"]
+                        "connection-operation", "--id", "op-1"]
                 stdout, stderr = io.StringIO(), io.StringIO()
                 with patch.object(dbeaver_api.sys, "argv", argv):
                     with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -494,7 +424,7 @@ class DBeaverApiClientTests(unittest.TestCase):
         }
         with ResponseServer(200, pending) as server:
             args = parse_args(
-                server.url, self.token_file, "connection-operation", "--id", "op-1",
+                server.url, "connection-operation", "--id", "op-1",
                 "--wait", "--wait-timeout", "1",
             )
             with patch.object(dbeaver_api.time, "monotonic", side_effect=[0.0, 0.0, 1.1]):
@@ -523,7 +453,7 @@ class DBeaverApiClientTests(unittest.TestCase):
         }
         with ResponseServer(routes=routes) as server:
             args = parse_args(
-                server.url, self.token_file, "connection-operation", "--id", "op-1",
+                server.url, "connection-operation", "--id", "op-1",
                 "--wait", "--wait-timeout", "2",
             )
             with patch.object(dbeaver_api.time, "monotonic", side_effect=[0.0, 0.0, 0.5]):
@@ -542,51 +472,26 @@ class DBeaverApiClientTests(unittest.TestCase):
         )
         with ResponseServer(routes=routes) as server:
             args = parse_args(
-                server.url, self.token_file, "create-connection", "--project-id", "project-1",
+                server.url, "create-connection", "--project-id", "project-1",
                 "--request-file", str(request_file),
             )
             with self.assertRaises(dbeaver_api.ApiError):
                 dbeaver_api.run(args)
         self.assertEqual(sum(r["method"] == "POST" for r in server.requests), 1)
 
-    def test_admin_redirect_is_not_followed_and_remote_admin_url_is_refused(self):
+    def test_redirects_are_refused_and_remote_api_urls_are_rejected(self):
         with ResponseServer() as destination:
             target = destination.url + "/capture"
             with ResponseServer(302, {}, redirect_to=target) as source:
-                args = parse_args(source.url, self.token_file, "projects")
-                with self.assertRaisesRegex(dbeaver_api.ApiError, "redirect refused"):
+                args = parse_args(source.url, "projects")
+                with self.assertRaisesRegex(dbeaver_api.ApiError, "local API redirect refused"):
                     dbeaver_api.run(args)
             self.assertEqual(len(source.requests), 1)
             self.assertEqual(destination.requests, [])
 
-        args = parse_args("https://api.example.test", self.token_file, "projects")
-        with self.assertRaises(dbeaver_api.ApiError):
+        args = parse_args("https://api.example.test", "projects")
+        with self.assertRaisesRegex(dbeaver_api.ApiError, "loopback IP URL"):
             dbeaver_api.run(args)
-
-    def test_project_discovery_requires_valid_token_and_data_routes_get_none(self):
-        bad_token = self.directory / "invalid-token"
-        bad_token.write_bytes(b"invalid token\n")
-        with ResponseServer(routes=target_routes()) as server:
-            args = parse_args(server.url, bad_token, "projects")
-            with self.assertRaises(dbeaver_api.ApiError):
-                dbeaver_api.run(args)
-            self.assertEqual(server.requests, [])
-
-        routes = target_routes()
-        routes[("GET", "/schema")] = (200, {"items": []})
-        with ResponseServer(routes=routes) as server:
-            datasource_list = parse_args(
-                server.url, self.directory / "missing-token", "datasources",
-                "--project-id", "project-1",
-            )
-            self.assertEqual(dbeaver_api.run(datasource_list), [datasource()])
-            args = parse_args(
-                server.url, self.directory / "missing-token", "schema", "--project-id", "project-1", "--ds-id", "ds-1"
-            )
-            dbeaver_api.run(args)
-        data_calls = [r for r in server.requests if urlsplit(r["path"]).path in ("/datasources", "/schema")]
-        self.assertTrue(data_calls)
-        self.assertTrue(all(r["authorization"] is None for r in data_calls))
 
 
 if __name__ == "__main__":

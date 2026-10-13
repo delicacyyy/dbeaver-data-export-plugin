@@ -7,7 +7,6 @@ import argparse
 from decimal import Decimal
 import json
 import os
-import re
 from ipaddress import ip_address
 from pathlib import Path
 import sys
@@ -60,10 +59,7 @@ def _require_loopback_url(url: str) -> None:
         or parsed.username is not None
         or parsed.password is not None
     ):
-        raise ApiError(
-            "Administrative API credentials may only be sent to a "
-            "loopback IP URL"
-        )
+        raise ApiError("Local API requests may only target a loopback IP URL")
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -98,7 +94,6 @@ def request_json(
     params: dict[str, Any] | None = None,
     payload: dict[str, Any] | str | None = None,
     timeout: float,
-    bearer_token: str | None = None,
     with_status: bool = False,
 ) -> Any:
     url = base_url.rstrip("/") + path
@@ -106,8 +101,7 @@ def request_json(
         query = {key: value for key, value in params.items() if value is not None}
         if query:
             url += "?" + urlencode(query)
-    if bearer_token is not None:
-        _require_loopback_url(url)
+    _require_loopback_url(url)
 
     body = None
     headers = {"Accept": "application/json"}
@@ -117,14 +111,8 @@ def request_json(
         )
         body = encoded.encode("utf-8")
         headers["Content-Type"] = "application/json; charset=utf-8"
-    if bearer_token is not None:
-        headers["Authorization"] = f"Bearer {bearer_token}"
-
     request = Request(url, data=body, headers=headers, method=method)
-    redirect_handlers = (
-        (_NoRedirectHandler(),) if bearer_token is not None else ()
-    )
-    opener = build_opener(ProxyHandler({}), *redirect_handlers)
+    opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
     try:
         with opener.open(request, timeout=timeout) as response:
             value = parse_json_or_text(response.read())
@@ -132,10 +120,10 @@ def request_json(
                 return response.getcode(), value
             return value
     except HTTPError as error:
-        if bearer_token is not None and 300 <= error.code < 400:
+        if 300 <= error.code < 400:
             error.close()
             raise ApiError(
-                f"HTTP {error.code}: administrative redirect refused"
+                f"HTTP {error.code}: local API redirect refused"
             ) from error
         response_body = parse_json_or_text(error.read())
         raise ApiError(
@@ -235,36 +223,6 @@ def read_json_request(filename: str, label: str) -> tuple[dict[str, Any], str]:
     return value, text
 
 
-def read_api_token(filename: str | None) -> str:
-    if not filename:
-        raise ApiError(
-            "Administrative commands require --api-token-file or "
-            "DBEAVER_DATA_API_TOKEN_FILE"
-        )
-    try:
-        with Path(filename).expanduser().open("rb") as token_file:
-            raw = token_file.read(4097)
-    except OSError:
-        raise ApiError("Unable to read API token file") from None
-    if len(raw) > 4096:
-        raise ApiError("API token file exceeds the size limit")
-    if raw.endswith(b"\r\n"):
-        raw = raw[:-2]
-    elif raw.endswith(b"\n"):
-        raw = raw[:-1]
-    if (
-        not 1 <= len(raw) <= 4096
-        or re.fullmatch(rb"[A-Za-z0-9._~+/-]+=*", raw) is None
-    ):
-        raise ApiError("API token file does not contain a valid token")
-    return raw.decode("ascii")
-
-
-def read_admin_token(args: argparse.Namespace) -> str:
-    _require_loopback_url(args.base_url)
-    return read_api_token(getattr(args, "api_token_file", None))
-
-
 def _response_object(value: Any, operation: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ApiError(f"Invalid {operation} response from API")
@@ -339,7 +297,6 @@ def _get_projects(args: argparse.Namespace) -> dict[str, Any]:
         args.base_url,
         "/projects",
         timeout=args.http_timeout,
-        bearer_token=read_admin_token(args),
         with_status=True,
     )
     result = _response_object(value, "projects")
@@ -548,7 +505,6 @@ def _get_operation(args: argparse.Namespace, operation_id: str, timeout: float) 
         args.base_url,
         f"/connection-operations/{quote(operation_id, safe='')}",
         timeout=timeout,
-        bearer_token=read_admin_token(args),
         with_status=True,
     )
     result = _validate_operation(value, operation_id)
@@ -633,7 +589,6 @@ def run(args: argparse.Namespace) -> Any:
             **common,
             path="/drivers",
             params={"projectId": project["id"], "providerId": provider_id, "driverId": driver_id},
-            bearer_token=read_admin_token(args),
             with_status=True,
         )
         result = _response_object(value, "drivers")
@@ -663,7 +618,6 @@ def run(args: argparse.Namespace) -> Any:
             path="/datasources",
             method="POST",
             payload=request_text,
-            bearer_token=read_admin_token(args),
             with_status=True,
         )
         result = _response_object(value, "connection creation")
@@ -694,7 +648,6 @@ def run(args: argparse.Namespace) -> Any:
             **common,
             path=f"/datasources/{quote(datasource['id'], safe='')}",
             params={"projectId": project["id"]},
-            bearer_token=read_admin_token(args),
             with_status=True,
         )
         if status != 200:
@@ -712,7 +665,6 @@ def run(args: argparse.Namespace) -> Any:
             method="POST",
             params={"projectId": project["id"]},
             payload=request_text,
-            bearer_token=read_admin_token(args),
             with_status=True,
         )
         if status != 202:
@@ -728,7 +680,6 @@ def run(args: argparse.Namespace) -> Any:
             method="POST",
             params={"projectId": project["id"]},
             payload=payload,
-            bearer_token=read_admin_token(args),
             with_status=True,
         )
         if status != 202:
@@ -820,8 +771,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL,
                         help=f"API base URL (default: {DEFAULT_BASE_URL})")
-    parser.add_argument("--api-token-file", default=os.environ.get("DBEAVER_DATA_API_TOKEN_FILE"),
-                        help="Path to the local token file (admin and project discovery)")
     parser.add_argument("--http-timeout", type=float, default=45.0,
                         help="Client-side HTTP timeout in seconds (default: 45)")
     parser.add_argument("--compact", action="store_true", help="Print compact JSON")
