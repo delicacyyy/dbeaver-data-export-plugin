@@ -1,11 +1,9 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.http;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -13,6 +11,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -23,22 +22,18 @@ public class HttpAdministrationTest {
     private static Object server;
     private static ExecutorService workers;
     private static String baseUrl;
-    private static String originalPort;
     private static HttpClient client;
 
     @BeforeClass
     public static void start() throws Exception {
-        originalPort = System.getProperty("janf.dataExport.port");
-        System.setProperty("janf.dataExport.port", "0");
-        new DataExportPlugin().init(null, null);
         workers = Executors.newFixedThreadPool(4);
-        field("executor").set(null, workers);
-        Method startServer = DataExportPlugin.class.getDeclaredMethod("startServer");
-        startServer.setAccessible(true);
-        startServer.invoke(null);
-        server = field("httpServer").get(null);
         Class<?> serverApi = Class.forName(
                 "com.sun.net.httpserver.HttpServer", true, ClassLoader.getPlatformClassLoader());
+        server = serverApi.getMethod("create", InetSocketAddress.class, int.class)
+                .invoke(null, new InetSocketAddress("127.0.0.1", 0), 0);
+        new DataExportController().registerWith(server);
+        serverApi.getMethod("setExecutor", Executor.class).invoke(server, workers);
+        serverApi.getMethod("start").invoke(server);
         InetSocketAddress address = (InetSocketAddress)
                 serverApi.getMethod("getAddress").invoke(server);
         baseUrl = "http://127.0.0.1:" + address.getPort();
@@ -58,7 +53,6 @@ public class HttpAdministrationTest {
         } finally {
             if (workers != null) workers.shutdownNow();
             client = null;
-            restore("janf.dataExport.port", originalPort);
         }
     }
 
@@ -178,16 +172,6 @@ public class HttpAdministrationTest {
         return value.getBytes(StandardCharsets.UTF_8);
     }
 
-    private static Field field(String name) throws Exception {
-        Field field = DataExportPlugin.class.getDeclaredField(name);
-        field.setAccessible(true);
-        return field;
-    }
-
-    private static void restore(String key, String value) {
-        if (value == null) System.clearProperty(key);
-        else System.setProperty(key, value);
-    }
 
     private static final class Response {
         private final int status;

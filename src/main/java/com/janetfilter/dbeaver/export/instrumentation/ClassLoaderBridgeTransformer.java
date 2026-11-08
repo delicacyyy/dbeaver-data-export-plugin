@@ -1,6 +1,8 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.instrumentation;
 
 import com.janetfilter.core.plugin.MyTransformer;
+import com.janetfilter.dbeaver.export.DataExportPlugin;
+import com.janetfilter.dbeaver.export.runtime.DBeaverRuntime;
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
 import org.objectweb.asm.ClassWriter;
@@ -11,8 +13,8 @@ import org.objectweb.asm.Opcodes;
  * Injects a classloader bridge call at the end of
  * {@code LicenseServiceEmbedded.<init>()}.
  *
- * <p>The injected bytecode stores DBeaver's OSGi classloader
- * into a static field on {@link DataExportPlugin}, enabling
+ * <p>The injected bytecode passes DBeaver's OSGi classloader through
+ * {@link DataExportPlugin} to {@link DBeaverRuntime}, enabling
  * reflection-based access to DBeaver's runtime objects.</p>
  *
  * <p>Injected code (at end of constructor, before return):

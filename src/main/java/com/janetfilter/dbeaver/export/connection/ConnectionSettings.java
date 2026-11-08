@@ -1,4 +1,8 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.connection;
+
+import com.janetfilter.dbeaver.export.utils.HttpException;
+import com.janetfilter.dbeaver.export.runtime.DBeaverRuntime;
+import com.janetfilter.dbeaver.export.runtime.DBeaverWorkspace;
 
 import com.google.gson.stream.JsonReader;
 import com.google.gson.stream.JsonToken;
@@ -122,21 +126,21 @@ final class ConnectionSettings {
     static void validateForDriver(Object driver, Map<String, Object> settings)
             throws Exception {
         if (settings == null) throw badRequest("connection settings are required");
-        String providerId = string(DataExportPlugin.call(driver, "getProviderId"));
+        String providerId = string(DBeaverRuntime.call(driver, "getProviderId"));
         validateParsedForDriver(driver, providerId, parse(providerId, settings));
     }
 
     private static void validateParsedForDriver(Object driver, String providerId,
             Map<String, Object> settings) throws Exception {
         Set<String> supportedFields = new HashSet<String>();
-        Object fields = DataExportPlugin.call(driver, "getSupportedPageFields");
+        Object fields = DBeaverRuntime.call(driver, "getSupportedPageFields");
         if (fields instanceof Iterable) {
             for (Object field : (Iterable<?>) fields) {
                 if (field != null) supportedFields.add(String.valueOf(field));
             }
         }
         Set<String> configurationTypes = new HashSet<String>();
-        Object types = DataExportPlugin.call(driver, "getSupportedConfigurationTypes");
+        Object types = DBeaverRuntime.call(driver, "getSupportedConfigurationTypes");
         if (types instanceof Iterable) {
             for (Object type : (Iterable<?>) types) {
                 if (type != null) configurationTypes.add(type.toString());
@@ -157,15 +161,15 @@ final class ConnectionSettings {
             throw unsupported("manual configuration is unavailable for these settings");
         }
         validatePropertyMap(providerId, settings.get("properties"),
-                DataExportPlugin.call(driver, "getMainPropertyDescriptors"), false);
+                DBeaverRuntime.call(driver, "getMainPropertyDescriptors"), false);
         validatePropertyMap(providerId, settings.get("providerProperties"),
-                DataExportPlugin.call(driver, "getProviderPropertyDescriptors"), true);
+                DBeaverRuntime.call(driver, "getProviderPropertyDescriptors"), true);
         mongoUriDetails(providerId, settings);
     }
 
     static void apply(Object configuration, Object driver,
             Map<String, Object> settings) throws Exception {
-        String providerId = string(DataExportPlugin.call(driver, "getProviderId"));
+        String providerId = string(DBeaverRuntime.call(driver, "getProviderId"));
         settings = parse(providerId, settings);
         validateParsedForDriver(driver, providerId, settings);
         MongoUriDetails mongo = mongoUriDetails(providerId, settings);
@@ -191,7 +195,7 @@ final class ConnectionSettings {
         String configurationType = settings.containsKey("url") ? "URL"
                 : hasManualHints(settings) ? "MANUAL" : null;
         if (configurationType != null) {
-            Object supported = DataExportPlugin.call(driver,
+            Object supported = DBeaverRuntime.call(driver,
                     "getSupportedConfigurationTypes");
             Object selected = null;
             if (supported instanceof Iterable) {
@@ -206,14 +210,14 @@ final class ConnectionSettings {
                 throw unsupported(configurationType
                         + " configuration is unavailable for this driver");
             }
-            DataExportPlugin.call(configuration, "setConfigurationType",
-                    DataExportPlugin.arr(selected));
+            DBeaverRuntime.call(configuration, "setConfigurationType",
+                    DBeaverRuntime.arr(selected));
         }
     }
 
     static Map<String, Object> snapshot(Object driver, Object configuration)
             throws Exception {
-        String providerId = string(DataExportPlugin.call(driver, "getProviderId"));
+        String providerId = string(DBeaverRuntime.call(driver, "getProviderId"));
         Map<String, Object> result = new LinkedHashMap<String, Object>();
         Object configurationType = optionalCall(configuration, "getConfigurationType");
         if (configurationType instanceof Enum) {
@@ -231,16 +235,16 @@ final class ConnectionSettings {
             try {
                 mongo = mongoUriDetails(providerId, scalarSettings(result, url));
                 result.put("url", url);
-            } catch (DataExportPlugin.HttpException invalid) {
+            } catch (HttpException invalid) {
                 // Invalid or conflicting URI settings are not safe to export.
             }
         }
         Map<String, String> main = snapshotProperties(providerId,
                 optionalCall(configuration, "getProperties"),
-                DataExportPlugin.call(driver, "getMainPropertyDescriptors"), false);
+                DBeaverRuntime.call(driver, "getMainPropertyDescriptors"), false);
         Map<String, String> provider = snapshotProperties(providerId,
                 optionalCall(configuration, "getProviderProperties"),
-                DataExportPlugin.call(driver, "getProviderPropertyDescriptors"), true);
+                DBeaverRuntime.call(driver, "getProviderPropertyDescriptors"), true);
         if (mongo.database != null && !result.containsKey("database")) {
             result.put("database", mongo.database);
         }
@@ -315,7 +319,7 @@ final class ConnectionSettings {
         if (descriptors != null && descriptors.getClass().isArray()) {
             for (int i = 0; i < Array.getLength(descriptors); i++) {
                 Object descriptor = Array.get(descriptors, i);
-                String id = string(DataExportPlugin.call(descriptor, "getId"));
+                String id = string(DBeaverRuntime.call(descriptor, "getId"));
                 if (id != null && isMongoAuthSetting(providerId, id)) described.add(id);
                 if (id != null && safePropertyName(providerId, id)
                         && (!isMongoAuthSetting(providerId, id)
@@ -363,7 +367,7 @@ final class ConnectionSettings {
 
     private static boolean propertyValueMatches(Object descriptor, String value)
             throws Exception {
-        Object typeValue = DataExportPlugin.call(descriptor, "getDataType");
+        Object typeValue = DBeaverRuntime.call(descriptor, "getDataType");
         if (!(typeValue instanceof Class)) return false;
         Class<?> type = (Class<?>) typeValue;
         try {
@@ -391,7 +395,7 @@ final class ConnectionSettings {
     }
 
     private static boolean sensitiveDescriptor(Object descriptor) throws Exception {
-        Object features = DataExportPlugin.call(descriptor, "getFeatures");
+        Object features = DBeaverRuntime.call(descriptor, "getFeatures");
         if (features != null && features.getClass().isArray()) {
             for (int i = 0; i < Array.getLength(features); i++) {
                 Object feature = Array.get(features, i);
@@ -401,13 +405,13 @@ final class ConnectionSettings {
         for (String feature : Arrays.asList("secret", "sensitive", "password",
                 "credential", "auth", "hidden")) {
             if (Boolean.TRUE.equals(optionalCall(descriptor, "hasFeature",
-                    DataExportPlugin.arr(feature)))) return true;
+                    DBeaverRuntime.arr(feature)))) return true;
         }
         return Boolean.TRUE.equals(optionalCall(descriptor, "isHidden"));
     }
 
     private static boolean safeMongoAuthDescriptor(Object descriptor) throws Exception {
-        Object features = DataExportPlugin.call(descriptor, "getFeatures");
+        Object features = DBeaverRuntime.call(descriptor, "getFeatures");
         if (features != null && features.getClass().isArray()) {
             for (int i = 0; i < Array.getLength(features); i++) {
                 Object feature = Array.get(features, i);
@@ -417,10 +421,10 @@ final class ConnectionSettings {
         for (String feature : Arrays.asList("secret", "sensitive", "password",
                 "credential", "hidden")) {
             if (Boolean.TRUE.equals(optionalCall(descriptor, "hasFeature",
-                    DataExportPlugin.arr(feature)))) return false;
+                    DBeaverRuntime.arr(feature)))) return false;
         }
         if (Boolean.TRUE.equals(optionalCall(descriptor, "isHidden"))) return false;
-        Object type = DataExportPlugin.call(descriptor, "getDataType");
+        Object type = DBeaverRuntime.call(descriptor, "getDataType");
         return type == String.class;
     }
 
@@ -553,7 +557,7 @@ final class ConnectionSettings {
         if (descriptors != null && descriptors.getClass().isArray()) {
             for (int i = 0; i < Array.getLength(descriptors); i++) {
                 Object descriptor = Array.get(descriptors, i);
-                String id = string(DataExportPlugin.call(descriptor, "getId"));
+                String id = string(DBeaverRuntime.call(descriptor, "getId"));
                 if (id != null && isMongoAuthSetting(providerId, id)) described.add(id);
                 if (id != null && safePropertyName(providerId, id)
                         && (!isMongoAuthSetting(providerId, id)
@@ -618,8 +622,8 @@ final class ConnectionSettings {
             throws Exception {
         if (target == null) return null;
         try {
-            return args == null ? DataExportPlugin.call(target, method)
-                    : DataExportPlugin.call(target, method, args);
+            return args == null ? DBeaverRuntime.call(target, method)
+                    : DBeaverRuntime.call(target, method, args);
         } catch (NoSuchMethodException unavailable) {
             return null;
         }
@@ -627,16 +631,16 @@ final class ConnectionSettings {
 
     private static void setOptional(Object target, String method, Object value)
             throws Exception {
-        if (value != null) DataExportPlugin.call(target, method,
-                DataExportPlugin.arr(value));
+        if (value != null) DBeaverRuntime.call(target, method,
+                DBeaverRuntime.arr(value));
     }
 
     private static void applyProperties(Object configuration, String method,
             Object properties) throws Exception {
         if (!(properties instanceof Map)) return;
         for (Map.Entry<?, ?> entry : ((Map<?, ?>) properties).entrySet()) {
-            DataExportPlugin.call(configuration, method,
-                    DataExportPlugin.arr(entry.getKey(), entry.getValue()));
+            DBeaverRuntime.call(configuration, method,
+                    DBeaverRuntime.arr(entry.getKey(), entry.getValue()));
         }
     }
 
@@ -711,11 +715,11 @@ final class ConnectionSettings {
     }
 
     private static RuntimeException badRequest(String message) {
-        return new DataExportPlugin.HttpException(400, message);
+        return new HttpException(400, message);
     }
 
     private static RuntimeException unsupported(String message) {
-        return new DataExportPlugin.HttpException(422, message);
+        return new HttpException(422, message);
     }
 
     private static StoredProfile readJson(Reader reader,

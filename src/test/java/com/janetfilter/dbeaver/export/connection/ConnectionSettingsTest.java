@@ -1,4 +1,7 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.connection;
+
+import com.janetfilter.dbeaver.export.utils.HttpException;
+import com.janetfilter.dbeaver.export.runtime.DBeaverWorkspace;
 
 import org.junit.Test;
 
@@ -248,7 +251,7 @@ public final class ConnectionSettingsTest {
         try {
             action.run();
             fail("expected HTTP " + status);
-        } catch (DataExportPlugin.HttpException error) {
+        } catch (HttpException error) {
             assertEquals(status, error.status);
             assertFalse(error.getMessage().contains("native-secret"));
             assertFalse(error.getMessage().contains("private"));

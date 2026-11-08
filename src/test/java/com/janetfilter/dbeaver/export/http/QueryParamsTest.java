@@ -1,4 +1,4 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.http;
 
 import org.junit.Test;
 
@@ -12,7 +12,7 @@ import static org.junit.Assert.assertTrue;
 public class QueryParamsTest {
     @Test
     public void decodesRawQueryComponentsExactlyOnce() {
-        Map<String, String> parameters = DataExportPlugin.queryParams(URI.create(
+        Map<String, String> parameters = DataExportController.queryParams(URI.create(
                 "http://localhost/rows?name=R%26D&plus=A%2BB&literal=A+B"
                         + "&percent=100%25&unicode=%E2%9C%93&d%73=profile"));
 

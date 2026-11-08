@@ -8,19 +8,24 @@ project/datasource IDs and sends only the selectors required by each endpoint.
 
 ## Loopback access and trust boundary
 
-The API has no plugin-managed authentication. The server listens only on
-`127.0.0.1`; database credentials and provider authentication remain in
-DBeaver. The bundled client accepts only loopback IP URL destinations, never
-follows redirects, and disables environment proxies. Configure its destination
-with `--base-url` or `DBEAVER_DATA_API_URL` if needed.
+The API has no plugin-managed authentication and has no token or separate
+availability setting. The server listens only on `127.0.0.1`; database
+credentials and provider authentication remain in DBeaver. The bundled client
+accepts only loopback IP URL destinations, never follows redirects, and
+disables environment proxies. Configure its destination with `--base-url` or
+`DBEAVER_DATA_API_URL` if needed. Loopback binding and `Origin` rejection are
+not authentication or protection from other local processes able to access
+the listener. Any external protection must cover direct access to that
+listener.
 
-The existing `Origin` rejection is retained only for the current discovery,
-connection-management, and operation-status routes: `GET /projects`,
-`GET /drivers`, `POST /datasources`, `GET /datasources/<id>`,
-`POST /datasources/<id>/edit`, `POST /datasources/<id>/test`, and
-`GET /connection-operations/<operationId>`. A supplied `Origin` is rejected on
-those routes; the API does not broaden that check to data routes. The client
-itself sends no `Origin`.
+The existing `Origin` rejection applies to the discovery,
+connection-management, operation-status, and runtime-evaluation routes:
+`GET /projects`, `GET /drivers`, `POST /datasources`,
+`GET /datasources/<id>`, `POST /datasources/<id>/edit`,
+`POST /datasources/<id>/test`, `GET /connection-operations/<operationId>`,
+and `POST /runtime/evaluate`. A supplied `Origin` is rejected on those
+routes; it is not broadened to the other data routes. The client itself sends
+no `Origin`.
 
 ## Selecting exact native targets
 
@@ -206,18 +211,139 @@ Schema metadata may be cached by the provider after DDL. Refresh it in DBeaver
 or verify the actual provider catalog through a scoped read before concluding
 that an object remains. Schema discovery does not establish a fresh snapshot.
 
+### `POST /runtime/evaluate`
+
+This route is always registered on the existing loopback server. It is an
+explicitly authorized, privileged Java evaluation facility, not a connection
+inspection endpoint. The only accepted input fields are required nonblank
+`code` and optional `args`; `args` defaults to an empty object. There are no
+project, datasource, language, or timeout fields, no discovery step, no
+availability option, and no token/authentication feature. The strict
+`application/json` request is limited to 1 MiB, must be valid UTF-8, rejects
+duplicate keys, and has maximum nesting depth 100.
+
+`code` is a Java 17 **method body**, not a class or import block. The generated
+method receives `Map<String,Object> args` and `RuntimeEvaluationContext
+runtime`, returns `Object`, and may throw `Exception`. The existing request
+parser represents JSON numbers as `BigDecimal`. The runtime helpers
+`runtime.c(name)`, `providerClass(anchor,name)`,
+`call(target,method,Object...args)`, and `construct(type,Object...args)` are
+available to the method body. For example, this request returns the decimal
+argument increased by one:
+
+```json
+{
+  "code": "return ((java.math.BigDecimal) args.get(\"amount\")).add(new java.math.BigDecimal(\"1\"));",
+  "args": {"amount": 1.25}
+}
+```
+
+Save that UTF-8 JSON as `runtime-request.json` and invoke exactly once:
+
+```powershell
+python .\skills\dbeaver-database-operator\scripts\dbeaver_api.py runtime-evaluate --request-file "runtime-request.json"
+```
+
+The CLI also accepts `--request-file -` to read UTF-8 JSON from stdin. It
+validates `code`, `args`, and unknown fields before sending the original JSON
+text in exactly one POST, preserving request number tokens. The command has no
+project or datasource selector and performs no target discovery. On success it
+requires a `200` JSON object containing `result` (including `result: null`),
+validates the result using decimal-preserving number parsing without assuming
+it is an object, and prints the original response JSON text so numeric tokens
+remain intact. Global
+`--http-timeout` controls only client waiting. A timeout, connection loss,
+truncated response, or other ambiguous transport/read failure does not stop
+the snippet. Never automatically retry: it may still be running or may already
+have changed DBeaver state.
+
+The in-process compiler requires `javax.tools.JavaCompiler` (`jdk.compiler`)
+in the DBeaver JVM; the current Temurin 25.0.3 runtime includes it. Source is
+compiled with `--release 17` and annotation processing disabled. Because the
+plugin is bootstrap-loaded, a narrow child-first bridge loader loads only the
+compiler bridge and its nested classes; its parent is the plugin loader when
+available, otherwise the platform loader. The bootstrap evaluator accesses
+that bridge reflectively through JDK-base types, not typed `javax.tools`
+references. The bridge is reused, while each evaluation gets a fresh snippet
+classloader. Instrumentation-appended bootstrap JARs expose classes but not
+resources: startup supplies the agent's plugin directory, and discovery selects
+the archive by its `JANF-Plugin-Entry` manifest identity, excludes disabled JARs,
+and rejects duplicate matches. Ordinary classpath/classes-root use without an
+agent environment resolves class-resource URLs. Source and class output remain
+in memory; there are no source/class temporary files or generated-class cache.
+Missing compiler, compiler archive, or native runtime loader returns `503`.
+
+The result is `200 {"result": <value>}`; `result` may be JSON `null`. Only null,
+strings, booleans, finite `Byte`, `Short`, `Integer`, `Long`, `Float`,
+`Double`, `BigInteger`, or `BigDecimal`, lists, and maps with string keys are
+accepted recursively. Arbitrary objects and other `Number` types are rejected.
+Cycles, non-finite numbers, invalid UTF-16, or container depth above 100
+(including the result envelope at depth one; an object/list result starts at
+depth two and scalar leaves add no container depth) produce `422` with phase
+`result`. The serialized UTF-8 response may not exceed 1 MiB including the
+envelope; shared acyclic references are allowed. Result validation occurs
+after code returns, so this failure does not undo effects. The evaluator does
+not hand arbitrary objects to Gson, capture/redirect stdout or stderr, or
+automatically log request code or arguments.
+
+At most one compilation, execution, or result serialization is active.
+Overlapping work fails fast with `409` phase `compile`. Evaluation runs
+synchronously on the existing HTTP background worker, without a new executor,
+persistent REPL, hard server timeout, or cancellation route. The thread context
+classloader is restored when evaluation ends. Code runs in the DBeaver process
+with access available to that process: there is no sandbox, credential
+isolation, transaction, or rollback guarantee. A safe existing-connection
+configuration snapshot remains explicitly filtered; this arbitrary-code
+endpoint does not inherit that safety boundary. The endpoint does not
+automatically marshal snippet code to SWT/UI thread; code requiring native UI
+access must explicitly dispatch through DBeaver's UI facilities.
+
+Responses for compile, execution, or result-contract failures use
+`{"error":"<generic message>","phase":"compile|execute|result",...}`.
+Compile failures return `422` phase `compile` and may include at most 20
+diagnostics. Each diagnostic's snippet-relative line/column excludes the four
+generated wrapper header lines; its diagnostic code is at most 120 characters
+and its message at most 240 characters. Diagnostics do not echo the full
+source. Result-contract failures return `422` phase `result`; execution
+exceptions return `500` phase `execute` and may include `exceptionType`, never
+raw exception messages, stack traces, source, or arguments. Missing native
+runtime loader/compiler returns `503` phase `compile`. The existing
+administrative `Origin` rejection also applies to this route. No result or
+error body is a promise of rollback if user code has already run.
+
+This capability must be used only when the user explicitly authorizes
+execution of the requested code. A request to inspect, explain, count, or
+diagnose alone does not authorize JVM code or mutations. Never include
+credentials or secrets in request arguments or return values; the lack of
+credential isolation means code may still access sensitive DBeaver process
+state.
+
 ## Common statuses and safety
 
 - `400`: missing/invalid parameters, JSON, or project/datasource selector.
-- `403`: a supplied `Origin` header on an administrative discovery, connection-management, or operation-status route.
+- `403`: a supplied `Origin` header on an administrative discovery, connection-management, operation-status, or runtime-evaluation route.
 - `404`: unknown project, datasource, driver, node, or operation.
 - `405`: unsupported method.
 - `413`: body exceeds 1 MiB.
-- `415`: connection creation used a non-JSON content type.
-- `422`: unsupported direct-mode configuration.
-- `409`: lifecycle or target conflict.
-- `500`: provider or execution failure.
-- `503`: DBeaver UI/native access or runtime unavailable.
-- `504`: execution timeout.
+- `415`: unsupported request content type.
+- `422`: unsupported direct-mode configuration, runtime snippet compilation failure, or invalid runtime result.
+- `409`: lifecycle/target conflict or a runtime evaluation is already active.
+- `500`: provider failure, `/execute` failure, or runtime snippet execution exception.
+- `503`: DBeaver UI/native runtime unavailable or runtime compiler unavailable.
+- `504`: existing `/execute` timeout; runtime evaluation has no hard server timeout.
 
-The API has no plugin-managed authentication and must remain loopback-only. The bundled client accepts only loopback IP URLs, never follows redirects, and ignores environment proxies. A successful save is not proof of connectivity; a test success is not proof that the profile remains connected. On any ambiguous mutation result, inspect the operation/profile before deciding what to do next.
+The API has no plugin-managed authentication, token, or runtime-availability
+setting and must remain loopback-only. Loopback and the `Origin` check do not
+protect against other local processes that can access the listener; any
+external protection must cover direct listener access. The bundled client
+accepts only loopback IP URLs, never follows redirects, and ignores
+environment proxies. A successful save is not proof of connectivity; a test
+success is not proof that the profile remains connected. Safe existing
+connection snapshots contain explicitly filtered non-secret settings, but
+runtime evaluation executes arbitrary code in-process without a sandbox,
+credential isolation, transaction, or rollback guarantee. Use it only with
+explicit user authorization. Do not infer a mutation from a request that only
+asks to inspect, explain, count, or diagnose. On an ambiguous mutation result,
+inspect before deciding what to do next; never automatically replay a
+runtime-evaluation request after timeout or disconnect because it may still be
+running or may already have changed state.

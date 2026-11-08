@@ -1,4 +1,4 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.data;
 
 import org.junit.Test;
 

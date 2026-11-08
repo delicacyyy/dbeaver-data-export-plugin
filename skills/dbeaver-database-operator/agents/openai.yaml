@@ -1,4 +1,4 @@
 interface:
   display_name: "DBeaver Database Operator"
-  short_description: "Manage project-aware DBeaver connections and data"
-  default_prompt: "Use $dbeaver-database-operator to select an exact DBeaver project and datasource, safely inspect or natively create/edit/test the connection when requested, then operate on its schema and verify the requested result. Keep credentials in native DBeaver and distinguish saved, connected, and tested states."
+  short_description: "Manage DBeaver connections, data, and authorized JVM evaluation"
+  default_prompt: "Use $dbeaver-database-operator to select an exact DBeaver project and datasource, safely inspect or natively create/edit/test the connection when requested, then operate on its schema and verify the requested result. Use JVM runtime evaluation only when the user explicitly authorizes running the requested Java code; it is privileged arbitrary in-process code without a sandbox or credential isolation, and timeouts do not cancel it. Keep credentials in native DBeaver and distinguish saved, connected, and tested states."

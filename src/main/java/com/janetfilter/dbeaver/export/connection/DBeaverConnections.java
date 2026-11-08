@@ -1,5 +1,10 @@
-package com.janetfilter.dbeaver.export;
-import static com.janetfilter.dbeaver.export.DataExportPlugin.call;
+package com.janetfilter.dbeaver.export.connection;
+import static com.janetfilter.dbeaver.export.runtime.DBeaverRuntime.arr;
+import static com.janetfilter.dbeaver.export.runtime.DBeaverRuntime.call;
+
+import com.janetfilter.dbeaver.export.utils.HttpException;
+import com.janetfilter.dbeaver.export.runtime.DBeaverRuntime;
+import com.janetfilter.dbeaver.export.runtime.DBeaverWorkspace;
 
 
 import java.io.InputStream;
@@ -23,7 +28,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 /** Runtime-backed connection discovery and creation for the DBeaver UI/API. */
-final class DBeaverConnections {
+public final class DBeaverConnections {
     private static final int MAX_OPERATIONS = 64;
     private static final long OPERATION_RETENTION_MILLIS = 60L * 60L * 1000L;
     private static final long QUEUED_TIMEOUT_MILLIS = 30L * 1000L;
@@ -37,7 +42,14 @@ final class DBeaverConnections {
 
     private DBeaverConnections() { }
 
-    static Object drivers(Map<String, String> query) throws Exception {
+    public static void ensureConnected(Object container) throws Exception {
+        if ((Boolean) call(container, "isConnected")) return;
+        Object monitor = DBeaverRuntime.createMonitorProxy(container);
+        if (monitor == null) throw new RuntimeException("no monitor");
+        call(container, "connect", arr(monitor, true, false));
+    }
+
+    public static Object drivers(Map<String, String> query) throws Exception {
         if (query == null) query = Collections.emptyMap();
         String projectId = query.get("projectId");
         if (!validId(projectId)) {
@@ -70,7 +82,7 @@ final class DBeaverConnections {
             selected = true;
             items.add(driverMetadata(driver, directWritable));
         }
-        if (!selected) throw new DataExportPlugin.HttpException(
+        if (!selected) throw new HttpException(
                 404, "enabled driver not found");
 
         Map<String, Object> result = new LinkedHashMap<String, Object>();
@@ -79,12 +91,12 @@ final class DBeaverConnections {
         return result;
     }
 
-    static Result create(Map<String, Object> request) throws Exception {
+    public static Result create(Map<String, Object> request) throws Exception {
         CreationRequest spec = parseRequest(request);
         DBeaverWorkspace.ProjectContext project =
                 DBeaverWorkspace.requireProject(spec.projectId);
         if (!DBeaverWorkspace.writable(project)) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     503, "data source storage is read-only");
         }
         if ("guided".equals(spec.mode)) assertNoNativeWizard();
@@ -104,7 +116,7 @@ final class DBeaverConnections {
         }
 
         if (spec.name != null && nameExists(project.registry, spec.name)) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     409, "a data source with that name already exists");
         }
         Object configuration = guidedConfiguration(driver, spec, info);
@@ -116,7 +128,7 @@ final class DBeaverConnections {
         return new Result(202, body);
     }
 
-    static Map<String, Object> inspect(String projectId, String datasourceId)
+    public static Map<String, Object> inspect(String projectId, String datasourceId)
             throws Exception {
         DBeaverWorkspace.ProjectContext project =
                 DBeaverWorkspace.requireProject(projectId);
@@ -124,8 +136,8 @@ final class DBeaverConnections {
         DBeaverWorkspace.Identity identity = DBeaverWorkspace.identity(descriptor);
         Profile profile = new Profile(descriptor, identity);
         boolean saved = new NativeDirectStore(project).isPersisted(profile);
-        Object driver = DataExportPlugin.call(descriptor, "getDriver");
-        Object configuration = DataExportPlugin.call(
+        Object driver = DBeaverRuntime.call(descriptor, "getDriver");
+        Object configuration = DBeaverRuntime.call(
                 descriptor, "getConnectionConfiguration");
         Map<String, Object> result = new LinkedHashMap<String, Object>();
         result.put("datasource", identity.asMap());
@@ -136,24 +148,24 @@ final class DBeaverConnections {
         return result;
     }
 
-    static Result edit(String projectId, String datasourceId,
+    public static Result edit(String projectId, String datasourceId,
             Map<String, Object> request) throws Exception {
         DBeaverWorkspace.ProjectContext project =
                 DBeaverWorkspace.requireProject(projectId);
         Object descriptor = DBeaverWorkspace.requireDatasource(project, datasourceId);
         if (!DBeaverWorkspace.writable(project)) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     503, "data source storage is read-only");
         }
         DBeaverWorkspace.Identity identity = DBeaverWorkspace.identity(descriptor);
         EditRequest spec = parseEditRequest(request, identity.providerId);
-        Object driver = DataExportPlugin.call(descriptor, "getDriver");
+        Object driver = DBeaverRuntime.call(descriptor, "getDriver");
         if (!spec.connection.isEmpty()) {
             ConnectionSettings.validateForDriver(driver, spec.connection);
         }
         if (spec.name != null
                 && nameExistsExcept(project.registry, spec.name, identity.id)) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     409, "a data source with that name already exists");
         }
         Profile profile = new Profile(descriptor, identity);
@@ -163,7 +175,7 @@ final class DBeaverConnections {
         return queued(operation);
     }
 
-    static Result test(String projectId, String datasourceId,
+    public static Result test(String projectId, String datasourceId,
             Map<String, Object> request) throws Exception {
         int timeoutSeconds = parseTestTimeout(request);
         DBeaverWorkspace.ProjectContext project =
@@ -231,30 +243,30 @@ final class DBeaverConnections {
     private static boolean nameExistsExcept(Object registry, String name,
             String excludedId) throws Exception {
         if (name == null) return false;
-        Object dataSources = DataExportPlugin.call(registry, "getDataSources");
+        Object dataSources = DBeaverRuntime.call(registry, "getDataSources");
         if (!(dataSources instanceof Iterable)) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     503, "data source registry is unavailable");
         }
         for (Object dataSource : (Iterable<?>) dataSources) {
-            String id = string(DataExportPlugin.call(dataSource, "getId"));
-            String currentName = string(DataExportPlugin.call(dataSource, "getName"));
+            String id = string(DBeaverRuntime.call(dataSource, "getId"));
+            String currentName = string(DBeaverRuntime.call(dataSource, "getName"));
             if (!excludedId.equals(id) && currentName != null
                     && name.equalsIgnoreCase(currentName)) return true;
         }
         return false;
     }
 
-    static Map<String, Object> operation(String id) throws Exception {
+    public static Map<String, Object> operation(String id) throws Exception {
         if (id == null || !id.matches("[0-9a-fA-F-]{36}")) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     404, "connection operation not found");
         }
         synchronized (OPERATION_LOCK) {
             pruneOperations(System.currentTimeMillis());
             Operation operation = OPERATIONS.get(id);
             if (operation == null) {
-                throw new DataExportPlugin.HttpException(
+                throw new HttpException(
                         404, "connection operation not found");
             }
             return operation.snapshot();
@@ -415,7 +427,7 @@ final class DBeaverConnections {
         boolean jdbcProvider = false;
         if (provider != null) {
             try {
-                Class<?> jdbcProviderClass = DataExportPlugin.providerClass(
+                Class<?> jdbcProviderClass = DBeaverRuntime.providerClass(
                         provider, "org.jkiss.dbeaver.model.impl.jdbc.JDBCDataSourceProvider");
                 jdbcProvider = jdbcProviderClass.isInstance(provider);
             } catch (ClassNotFoundException unavailable) {
@@ -439,12 +451,12 @@ final class DBeaverConnections {
     }
 
     private static List<Object> enabledDrivers() throws Exception {
-        Object platform = DataExportPlugin.call(
-                DataExportPlugin.c("org.jkiss.dbeaver.runtime.DBWorkbench"),
+        Object platform = DBeaverRuntime.call(
+                DBeaverRuntime.c("org.jkiss.dbeaver.runtime.DBWorkbench"),
                 "getPlatform");
-        Object providerRegistry = DataExportPlugin.call(
+        Object providerRegistry = DBeaverRuntime.call(
                 platform, "getDataSourceProviderRegistry");
-        Object providers = DataExportPlugin.call(
+        Object providers = DBeaverRuntime.call(
                 providerRegistry, "getEnabledDataSourceProviders");
         if (!(providers instanceof Iterable)) {
             throw new IllegalStateException("enabled provider list is unavailable");
@@ -452,7 +464,7 @@ final class DBeaverConnections {
         List<Object> drivers = new ArrayList<Object>();
         for (Object provider : (Iterable<?>) providers) {
             if (provider == null) continue;
-            Object currentDrivers = DataExportPlugin.call(provider, "getEnabledDrivers");
+            Object currentDrivers = DBeaverRuntime.call(provider, "getEnabledDrivers");
             if (!(currentDrivers instanceof Iterable)) continue;
             for (Object driver : (Iterable<?>) currentDrivers) {
                 if (driver == null || !usableDriver(driver)) continue;
@@ -482,7 +494,7 @@ final class DBeaverConnections {
             if (providerId.equals(call(driver, "getProviderId"))
                     && driverId.equals(call(driver, "getId"))) return driver;
         }
-        throw new DataExportPlugin.HttpException(404, "enabled driver not found");
+        throw new HttpException(404, "enabled driver not found");
     }
 
     private static void validateConnection(CreationRequest spec, DriverInfo info,
@@ -529,16 +541,16 @@ final class DBeaverConnections {
 
     private static Object guidedConfiguration(Object driver, CreationRequest spec,
             DriverInfo info) throws Exception {
-        Object configuration = DataExportPlugin.construct(
-                DataExportPlugin.c("org.jkiss.dbeaver.model.connection.DBPConnectionConfiguration"));
+        Object configuration = DBeaverRuntime.construct(
+                DBeaverRuntime.c("org.jkiss.dbeaver.model.connection.DBPConnectionConfiguration"));
         fillConfiguration(configuration, driver, spec.connection, info, false);
         return configuration;
     }
 
     private static Object directConfiguration(Object driver, CreationRequest spec,
             DriverInfo info) throws Exception {
-        Object configuration = DataExportPlugin.construct(
-                DataExportPlugin.c("org.jkiss.dbeaver.model.connection.DBPConnectionConfiguration"));
+        Object configuration = DBeaverRuntime.construct(
+                DBeaverRuntime.c("org.jkiss.dbeaver.model.connection.DBPConnectionConfiguration"));
         fillConfiguration(configuration, driver, spec.connection, info, true);
         return configuration;
     }
@@ -564,17 +576,17 @@ final class DBeaverConnections {
                 if (direct) throw unsupported("URL configuration is unavailable; choose guided mode");
                 throw unsupported("manual configuration is unavailable for these hints; choose guided mode");
             }
-            DataExportPlugin.call(configuration, "setConfigurationType",
-                    DataExportPlugin.arr(type));
+            DBeaverRuntime.call(configuration, "setConfigurationType",
+                    DBeaverRuntime.arr(type));
         }
         if (direct) {
-            Object generated = DataExportPlugin.call(driver, "getConnectionURL",
-                    DataExportPlugin.arr(configuration));
+            Object generated = DBeaverRuntime.call(driver, "getConnectionURL",
+                    DBeaverRuntime.arr(configuration));
             String supplied = (String) connection.get("url");
             if (!(generated instanceof String)
                     || !supplied.equals(generated)
                     || ConnectionSettings.containsCredentials(
-                            string(DataExportPlugin.call(driver, "getProviderId")),
+                            string(DBeaverRuntime.call(driver, "getProviderId")),
                             (String) generated)) {
                 throw unsupported("DBeaver cannot establish the requested safe JDBC URL; choose guided mode");
             }
@@ -625,8 +637,8 @@ final class DBeaverConnections {
             operation.identity = identity;
             operation.editRequest = request;
             operation.saved = saved;
-            Object existingDriver = DataExportPlugin.call(descriptor, "getDriver");
-            Object existingConfiguration = DataExportPlugin.call(
+            Object existingDriver = DBeaverRuntime.call(descriptor, "getDriver");
+            Object existingConfiguration = DBeaverRuntime.call(
                     descriptor, "getConnectionConfiguration");
             operation.initialSettings = ConnectionSettings.snapshot(
                     existingDriver, existingConfiguration);
@@ -661,7 +673,7 @@ final class DBeaverConnections {
         if (activeOperationId != null) {
             Operation active = OPERATIONS.get(activeOperationId);
             if (active != null && !active.terminal()) {
-                throw new DataExportPlugin.HttpException(
+                throw new HttpException(
                         409, "a guided connection wizard is already active");
             }
             activeOperationId = null;
@@ -670,7 +682,7 @@ final class DBeaverConnections {
 
     private static void requireOperationCapacityLocked() {
         if (OPERATIONS.size() >= MAX_OPERATIONS) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     503, "connection operation capacity is full");
         }
     }
@@ -690,15 +702,15 @@ final class DBeaverConnections {
         } catch (Exception failure) {
             OPERATIONS.remove(operation.id);
             releaseActive(operation);
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     503, "DBeaver UI could not schedule the connection wizard");
         }
     }
 
     private static void dispatchGuided(final Operation operation) throws Exception {
-        Object workbench = DataExportPlugin.call(
+        Object workbench = DBeaverRuntime.call(
                 uiClass("org.eclipse.ui.PlatformUI"), "getWorkbench");
-        Object display = DataExportPlugin.call(workbench, "getDisplay");
+        Object display = DBeaverRuntime.call(workbench, "getDisplay");
         if (display == null) {
             fail(operation, "ui_unavailable", "DBeaver UI is unavailable");
             return;
@@ -717,7 +729,7 @@ final class DBeaverConnections {
                     } else {
                         openGuided(operation);
                     }
-                } catch (DataExportPlugin.HttpException failure) {
+                } catch (HttpException failure) {
                     CleanupOutcome cleanup = abandonUnattachedWizard(operation);
                     synchronized (OPERATION_LOCK) {
                         operation.diagnostic = DBeaverConnectionTester.diagnose(failure);
@@ -738,20 +750,20 @@ final class DBeaverConnections {
                 }
             }
         };
-        DataExportPlugin.call(display, "asyncExec", DataExportPlugin.arr(task));
+        DBeaverRuntime.call(display, "asyncExec", DBeaverRuntime.arr(task));
     }
 
     private static void openGuided(Operation operation) throws Exception {
         if (!markUiStarted(operation)) return;
         assertNoNativeWizard();
-        Object workbench = DataExportPlugin.call(
+        Object workbench = DBeaverRuntime.call(
                 uiClass("org.eclipse.ui.PlatformUI"), "getWorkbench");
-        Object window = DataExportPlugin.call(workbench, "getActiveWorkbenchWindow");
-        if (window == null) throw new DataExportPlugin.HttpException(
+        Object window = DBeaverRuntime.call(workbench, "getActiveWorkbenchWindow");
+        if (window == null) throw new HttpException(
                 503, "DBeaver workbench window is unavailable");
 
         selectNavigatorProject(window, operation.project);
-        Object wizard = DataExportPlugin.construct(
+        Object wizard = DBeaverRuntime.construct(
                 uiClass("org.jkiss.dbeaver.ui.dialogs.connection.NewConnectionWizard"),
                 operation.driver, operation.configuration);
         operation.wizard = wizard;
@@ -766,15 +778,15 @@ final class DBeaverConnections {
         operation.dialog = dialog;
         Field instance = nativeDialogField();
         if (instance.get(null) != null) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     409, "a native connection wizard is already open");
         }
         instance.set(null, dialog);
         // Native shell modality does not make JFace open() non-blocking.
         // Own the dialog lifecycle so completion is observed after real disposal.
-        DataExportPlugin.call(dialog, "setBlockOnOpen", arr(false));
-        DataExportPlugin.call(dialog, "create");
-        Object shell = DataExportPlugin.call(dialog, "getShell");
+        DBeaverRuntime.call(dialog, "setBlockOnOpen", arr(false));
+        DBeaverRuntime.call(dialog, "create");
+        Object shell = DBeaverRuntime.call(dialog, "getShell");
         if (shell == null) throw new IllegalStateException("native wizard has no shell");
         operation.shell = shell;
         requireWizardProject(wizard, operation.project);
@@ -782,8 +794,8 @@ final class DBeaverConnections {
             prefillWizardName(wizard, operation.spec.name, true);
         }
         attachDisposeListener(shell, operation);
-        DataExportPlugin.call(dialog, "open");
-        if (Boolean.TRUE.equals(DataExportPlugin.call(shell, "isDisposed"))) {
+        DBeaverRuntime.call(dialog, "open");
+        if (Boolean.TRUE.equals(DBeaverRuntime.call(shell, "isDisposed"))) {
             scheduleShellCompletion(operation, shell);
         } else {
             transitionToAwaitingInput(operation);
@@ -794,10 +806,10 @@ final class DBeaverConnections {
         if (!markUiStarted(operation)) return;
         assertNoNativeWizard();
         assertNoNativeEditDialog();
-        Object workbench = DataExportPlugin.call(
+        Object workbench = DBeaverRuntime.call(
                 uiClass("org.eclipse.ui.PlatformUI"), "getWorkbench");
-        Object window = DataExportPlugin.call(workbench, "getActiveWorkbenchWindow");
-        if (window == null) throw new DataExportPlugin.HttpException(
+        Object window = DBeaverRuntime.call(workbench, "getActiveWorkbenchWindow");
+        if (window == null) throw new HttpException(
                 503, "DBeaver workbench window is unavailable");
         final Object target = operation.targetDescriptor;
         Class<?> dialogType = uiClass(
@@ -815,9 +827,9 @@ final class DBeaverConnections {
                             Object wizard = args[0];
                             operation.wizard = wizard;
                             requireWizardProject(wizard, operation.project);
-                            if (DataExportPlugin.call(wizard,
+                            if (DBeaverRuntime.call(wizard,
                                     "getOriginalDataSource") != target) {
-                                throw new DataExportPlugin.HttpException(
+                                throw new HttpException(
                                         409, "native edit wizard selected a different profile");
                             }
                             applyEditPrefills(wizard, operation);
@@ -830,8 +842,8 @@ final class DBeaverConnections {
                         return null;
                     }
                 });
-        boolean accepted = Boolean.TRUE.equals(DataExportPlugin.call(dialogType,
-                "openEditConnectionDialog", DataExportPlugin.arr(window, target,
+        boolean accepted = Boolean.TRUE.equals(DBeaverRuntime.call(dialogType,
+                "openEditConnectionDialog", DBeaverRuntime.arr(window, target,
                         null, consumer)));
         completeEditGuided(operation, accepted);
     }
@@ -844,10 +856,10 @@ final class DBeaverConnections {
         Object dialogs = field.get(null);
         if (!(dialogs instanceof Map)) return;
         for (Object dialog : ((Map<?, ?>) dialogs).values()) {
-            Object shell = DataExportPlugin.call(dialog, "getShell");
+            Object shell = DBeaverRuntime.call(dialog, "getShell");
             if (shell == null
-                    || !Boolean.TRUE.equals(DataExportPlugin.call(shell, "isDisposed"))) {
-                throw new DataExportPlugin.HttpException(
+                    || !Boolean.TRUE.equals(DBeaverRuntime.call(shell, "isDisposed"))) {
+                throw new HttpException(
                         409, "a native connection edit dialog is already open");
             }
         }
@@ -856,19 +868,19 @@ final class DBeaverConnections {
     private static void applyEditPrefills(Object wizard, Operation operation)
             throws Exception {
         EditRequest request = operation.editRequest;
-        Object draft = DataExportPlugin.call(wizard, "getActiveDataSource");
+        Object draft = DBeaverRuntime.call(wizard, "getActiveDataSource");
         if (draft == null) throw new IllegalStateException(
                 "native edit wizard has no working profile");
         if (request.name != null) {
-            DataExportPlugin.call(draft, "setName",
-                    DataExportPlugin.arr(request.name));
-            if (!request.name.equals(DataExportPlugin.call(draft, "getName"))) {
+            DBeaverRuntime.call(draft, "setName",
+                    DBeaverRuntime.arr(request.name));
+            if (!request.name.equals(DBeaverRuntime.call(draft, "getName"))) {
                 throw new IllegalStateException("native edit name prefill was rejected");
             }
         }
         if (!request.connection.isEmpty()) {
-            Object driver = DataExportPlugin.call(draft, "getDriver");
-            Object configuration = DataExportPlugin.call(
+            Object driver = DBeaverRuntime.call(draft, "getDriver");
+            Object configuration = DBeaverRuntime.call(
                     draft, "getConnectionConfiguration");
             ConnectionSettings.apply(configuration, driver, request.connection);
         }
@@ -876,10 +888,10 @@ final class DBeaverConnections {
 
     private static void scheduleEditNamePrefill(final Operation operation,
             final Object wizard) throws Exception {
-        Object workbench = DataExportPlugin.call(
+        Object workbench = DBeaverRuntime.call(
                 uiClass("org.eclipse.ui.PlatformUI"), "getWorkbench");
-        Object display = DataExportPlugin.call(workbench, "getDisplay");
-        DataExportPlugin.call(display, "asyncExec", DataExportPlugin.arr(new Runnable() {
+        Object display = DBeaverRuntime.call(workbench, "getDisplay");
+        DBeaverRuntime.call(display, "asyncExec", DBeaverRuntime.arr(new Runnable() {
             @Override public void run() {
                 if (operation.terminal()) return;
                 try {
@@ -887,9 +899,9 @@ final class DBeaverConnections {
                     pageField.setAccessible(true);
                     Object page = pageField.get(wizard);
                     if (page == null) throw new IllegalStateException("native general page unavailable");
-                    String pageName = string(DataExportPlugin.call(page, "getName"));
-                    if (!Boolean.TRUE.equals(DataExportPlugin.call(wizard,
-                            "openSettingsPage", DataExportPlugin.arr(pageName)))) {
+                    String pageName = string(DBeaverRuntime.call(page, "getName"));
+                    if (!Boolean.TRUE.equals(DBeaverRuntime.call(wizard,
+                            "openSettingsPage", DBeaverRuntime.arr(pageName)))) {
                         throw new IllegalStateException("native general page could not be shown");
                     }
                     Field textField = page.getClass().getDeclaredField("connectionNameText");
@@ -897,8 +909,8 @@ final class DBeaverConnections {
                     Object text = textField.get(page);
                     if (text == null) throw new IllegalStateException("native name control unavailable");
                     String name = operation.editRequest.name;
-                    DataExportPlugin.call(text, "setText", DataExportPlugin.arr(name));
-                    if (!name.equals(DataExportPlugin.call(text, "getText"))) {
+                    DBeaverRuntime.call(text, "setText", DBeaverRuntime.arr(name));
+                    if (!name.equals(DBeaverRuntime.call(text, "getText"))) {
                         throw new IllegalStateException("native name control rejected the prefill");
                     }
                     transitionToAwaitingInput(operation);
@@ -916,10 +928,10 @@ final class DBeaverConnections {
                         Object dialogs = dialogsField.get(null);
                         if (dialogs instanceof Map) {
                             for (Object dialog : ((Map<?, ?>) dialogs).values()) {
-                                if (DataExportPlugin.call(dialog, "getWizard") == wizard) {
-                                    DataExportPlugin.call(dialog, "setReturnCode", DataExportPlugin.arr(1));
-                                    DataExportPlugin.call(wizard, "performCancel");
-                                    DataExportPlugin.call(dialog, "close");
+                                if (DBeaverRuntime.call(dialog, "getWizard") == wizard) {
+                                    DBeaverRuntime.call(dialog, "setReturnCode", DBeaverRuntime.arr(1));
+                                    DBeaverRuntime.call(wizard, "performCancel");
+                                    DBeaverRuntime.call(dialog, "close");
                                     break;
                                 }
                             }
@@ -942,8 +954,8 @@ final class DBeaverConnections {
         }
         Object original = operation.targetDescriptor;
         String originalId = operation.identity.id;
-        Object current = DataExportPlugin.call(operation.project.registry,
-                "getDataSource", DataExportPlugin.arr(originalId));
+        Object current = DBeaverRuntime.call(operation.project.registry,
+                "getDataSource", DBeaverRuntime.arr(originalId));
         if (current != original) {
             DBeaverWorkspace.Identity currentIdentity = current == null
                     ? operation.identity : DBeaverWorkspace.identity(current);
@@ -963,8 +975,8 @@ final class DBeaverConnections {
                     new CleanupOutcome(false, false, false, false));
             return;
         }
-        Object driver = DataExportPlugin.call(current, "getDriver");
-        Object configuration = DataExportPlugin.call(
+        Object driver = DBeaverRuntime.call(current, "getDriver");
+        Object configuration = DBeaverRuntime.call(
                 current, "getConnectionConfiguration");
         Map<String, Object> currentSettings =
                 ConnectionSettings.snapshot(driver, configuration);
@@ -1025,64 +1037,64 @@ final class DBeaverConnections {
 
     private static void selectNavigatorProject(Object window,
             DBeaverWorkspace.ProjectContext project) throws Exception {
-        DataExportPlugin.call(project.workspace, "setActiveProject",
-                DataExportPlugin.arr(project.project));
-        Object page = DataExportPlugin.call(window, "getActivePage");
-        if (page == null) throw new DataExportPlugin.HttpException(
+        DBeaverRuntime.call(project.workspace, "setActiveProject",
+                DBeaverRuntime.arr(project.project));
+        Object page = DBeaverRuntime.call(window, "getActivePage");
+        if (page == null) throw new HttpException(
                 503, "DBeaver workbench page is unavailable");
         Class<?> navigatorType = uiClass(
                 "org.jkiss.dbeaver.ui.navigator.project.ProjectNavigatorView");
         String viewId = string(navigatorType.getField("VIEW_ID").get(null));
-        Object view = DataExportPlugin.call(page, "findView",
-                DataExportPlugin.arr(viewId));
+        Object view = DBeaverRuntime.call(page, "findView",
+                DBeaverRuntime.arr(viewId));
         if (view == null) {
-            view = DataExportPlugin.call(page, "showView",
-                    DataExportPlugin.arr(viewId));
+            view = DBeaverRuntime.call(page, "showView",
+                    DBeaverRuntime.arr(viewId));
         }
-        Object viewer = DataExportPlugin.call(view, "getNavigatorViewer");
-        Object root = DataExportPlugin.call(view, "getRootNode");
+        Object viewer = DBeaverRuntime.call(view, "getNavigatorViewer");
+        Object root = DBeaverRuntime.call(view, "getRootNode");
         if (root == null) {
-            Object model = DataExportPlugin.call(navigatorType,
+            Object model = DBeaverRuntime.call(navigatorType,
                     "getGlobalNavigatorModel");
-            root = model == null ? null : DataExportPlugin.call(model, "getRoot");
+            root = model == null ? null : DBeaverRuntime.call(model, "getRoot");
         }
-        Object projectNode = root == null ? null : DataExportPlugin.call(root,
-                "getProjectNode", DataExportPlugin.arr(project.project));
+        Object projectNode = root == null ? null : DBeaverRuntime.call(root,
+                "getProjectNode", DBeaverRuntime.arr(project.project));
         if (viewer == null || projectNode == null) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     503, "DBeaver navigator project selection is unavailable");
         }
-        DataExportPlugin.call(page, "activate", DataExportPlugin.arr(view));
-        DataExportPlugin.call(view, "setFocus");
-        Object selection = DataExportPlugin.construct(
+        DBeaverRuntime.call(page, "activate", DBeaverRuntime.arr(view));
+        DBeaverRuntime.call(view, "setFocus");
+        Object selection = DBeaverRuntime.construct(
                 uiClass("org.eclipse.jface.viewers.StructuredSelection"),
                 projectNode);
-        DataExportPlugin.call(viewer, "setSelection",
-                DataExportPlugin.arr(selection, Boolean.TRUE));
-        Object current = DataExportPlugin.call(viewer, "getSelection");
+        DBeaverRuntime.call(viewer, "setSelection",
+                DBeaverRuntime.arr(selection, Boolean.TRUE));
+        Object current = DBeaverRuntime.call(viewer, "getSelection");
         Object selected = current == null ? null
-                : DataExportPlugin.call(current, "getFirstElement");
+                : DBeaverRuntime.call(current, "getFirstElement");
         Object selectedProject = selected == null ? null
-                : DataExportPlugin.call(selected, "getProject");
+                : DBeaverRuntime.call(selected, "getProject");
         String selectedId = selectedProject == null ? null
-                : string(DataExportPlugin.call(selectedProject, "getId"));
+                : string(DBeaverRuntime.call(selectedProject, "getId"));
         if (!project.id.equals(selectedId)) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     409, "DBeaver navigator did not select the requested project");
         }
     }
 
     private static void requireWizardProject(Object wizard,
             DBeaverWorkspace.ProjectContext expected) throws Exception {
-        Object registry = DataExportPlugin.call(wizard, "getDataSourceRegistry");
+        Object registry = DBeaverRuntime.call(wizard, "getDataSourceRegistry");
         Method selectedMethod = wizard.getClass().getDeclaredMethod(
                 "getSelectedProject");
         selectedMethod.setAccessible(true);
         Object selectedProject = selectedMethod.invoke(wizard);
         String selectedId = selectedProject == null ? null
-                : string(DataExportPlugin.call(selectedProject, "getId"));
+                : string(DBeaverRuntime.call(selectedProject, "getId"));
         if (registry != expected.registry || !expected.id.equals(selectedId)) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     409, "native connection wizard selected a different project");
         }
     }
@@ -1090,13 +1102,13 @@ final class DBeaverConnections {
 
     private static void prefillWizardName(Object wizard, String name,
             boolean requireGeneralPage) throws Exception {
-        Object activeDataSource = DataExportPlugin.call(wizard, "getActiveDataSource");
+        Object activeDataSource = DBeaverRuntime.call(wizard, "getActiveDataSource");
         if (activeDataSource == null) {
             throw new IllegalStateException("wizard has no active profile to prefill");
         }
-        DataExportPlugin.call(activeDataSource, "setName",
-                DataExportPlugin.arr(name));
-        if (!name.equals(DataExportPlugin.call(activeDataSource, "getName"))) {
+        DBeaverRuntime.call(activeDataSource, "setName",
+                DBeaverRuntime.arr(name));
+        if (!name.equals(DBeaverRuntime.call(activeDataSource, "getName"))) {
             throw new IllegalStateException("wizard profile name was not applied");
         }
         Field pageGeneral = wizard.getClass().getDeclaredField("pageGeneral");
@@ -1115,17 +1127,17 @@ final class DBeaverConnections {
         if (pageDataSource == null) {
             throw new IllegalStateException("native general page has no profile");
         }
-        DataExportPlugin.call(pageDataSource, "setName",
-                DataExportPlugin.arr(name));
-        if (!name.equals(DataExportPlugin.call(pageDataSource, "getName"))) {
+        DBeaverRuntime.call(pageDataSource, "setName",
+                DBeaverRuntime.arr(name));
+        if (!name.equals(DBeaverRuntime.call(pageDataSource, "getName"))) {
             throw new IllegalStateException("native profile name was not applied");
         }
         Field nameText = page.getClass().getDeclaredField("connectionNameText");
         nameText.setAccessible(true);
         Object text = nameText.get(page);
         if (text != null) {
-            DataExportPlugin.call(text, "setText", DataExportPlugin.arr(name));
-            if (!name.equals(DataExportPlugin.call(text, "getText"))) {
+            DBeaverRuntime.call(text, "setText", DBeaverRuntime.arr(name));
+            if (!name.equals(DBeaverRuntime.call(text, "getText"))) {
                 throw new IllegalStateException("wizard name field rejected the prefill");
             }
         }
@@ -1154,8 +1166,8 @@ final class DBeaverConnections {
                 });
         int dispose = uiClass("org.eclipse.swt.SWT")
                 .getField("Dispose").getInt(null);
-        DataExportPlugin.call(shell, "addListener",
-                DataExportPlugin.arr(dispose, listener));
+        DBeaverRuntime.call(shell, "addListener",
+                DBeaverRuntime.arr(dispose, listener));
     }
     private static void watchWizardSubstitution(final Operation operation,
             Object wizard) throws Exception {
@@ -1172,9 +1184,9 @@ final class DBeaverConnections {
                                 && args != null && args.length == 1) {
                             Object event = args[0];
                             if ("driver-substitution".equals(
-                                    DataExportPlugin.call(event, "getProperty"))) {
+                                    DBeaverRuntime.call(event, "getProperty"))) {
                                 Object substitution =
-                                        DataExportPlugin.call(event, "getNewValue");
+                                        DBeaverRuntime.call(event, "getNewValue");
                                 synchronized (OPERATION_LOCK) {
                                     if (!operation.terminal()) {
                                         operation.pendingSubstitution = substitution;
@@ -1186,23 +1198,23 @@ final class DBeaverConnections {
                         return null;
                     }
                 });
-        DataExportPlugin.call(wizard, "addPropertyChangeListener",
-                DataExportPlugin.arr(listener));
+        DBeaverRuntime.call(wizard, "addPropertyChangeListener",
+                DBeaverRuntime.arr(listener));
     }
 
     private static void scheduleShellCompletion(final Operation operation,
             final Object closedShell) {
         try {
-            Object workbench = DataExportPlugin.call(
+            Object workbench = DBeaverRuntime.call(
                     uiClass("org.eclipse.ui.PlatformUI"), "getWorkbench");
-            Object display = DataExportPlugin.call(workbench, "getDisplay");
+            Object display = DBeaverRuntime.call(workbench, "getDisplay");
             Runnable resolve = new Runnable() {
                 @Override public void run() {
                     resolveShellCompletion(operation, closedShell, 0);
                 }
             };
-            DataExportPlugin.call(display, "timerExec",
-                    DataExportPlugin.arr(SUBSTITUTION_POLL_DELAY_MILLIS, resolve));
+            DBeaverRuntime.call(display, "timerExec",
+                    DBeaverRuntime.arr(SUBSTITUTION_POLL_DELAY_MILLIS, resolve));
         } catch (Exception failure) {
             if (operation.continuationPending) {
                 failUnresolvedContinuation(operation);
@@ -1246,17 +1258,17 @@ final class DBeaverConnections {
                 return;
             }
             if (attempts + 1 < MAX_SUBSTITUTION_POLLS) {
-                Object workbench = DataExportPlugin.call(
+                Object workbench = DBeaverRuntime.call(
                         uiClass("org.eclipse.ui.PlatformUI"),
                         "getWorkbench");
-                Object display = DataExportPlugin.call(workbench, "getDisplay");
+                Object display = DBeaverRuntime.call(workbench, "getDisplay");
                 Runnable resolve = new Runnable() {
                     @Override public void run() {
                         resolveShellCompletion(operation, closedShell, attempts + 1);
                     }
                 };
-                DataExportPlugin.call(display, "timerExec",
-                        DataExportPlugin.arr(SUBSTITUTION_POLL_DELAY_MILLIS, resolve));
+                DBeaverRuntime.call(display, "timerExec",
+                        DBeaverRuntime.arr(SUBSTITUTION_POLL_DELAY_MILLIS, resolve));
                 return;
             }
             failUnresolvedContinuation(operation);
@@ -1273,15 +1285,15 @@ final class DBeaverConnections {
         if (expected == null) return null;
         Object dialog = nativeDialogField().get(null);
         if (dialog == null) return null;
-        Object wizard = DataExportPlugin.call(dialog, "getWizard");
+        Object wizard = DBeaverRuntime.call(dialog, "getWizard");
         if (wizard == null || wizard == operation.wizard) return null;
-        Object actual = DataExportPlugin.call(wizard, "getDriverSubstitution");
+        Object actual = DBeaverRuntime.call(wizard, "getDriverSubstitution");
         if (!sameSubstitution(expected, actual)) return null;
-        Object shell = DataExportPlugin.call(dialog, "getShell");
-        if (Boolean.TRUE.equals(DataExportPlugin.call(shell, "isDisposed"))) {
+        Object shell = DBeaverRuntime.call(dialog, "getShell");
+        if (Boolean.TRUE.equals(DBeaverRuntime.call(shell, "isDisposed"))) {
             return null;
         }
-        Object registry = DataExportPlugin.call(wizard, "getDataSourceRegistry");
+        Object registry = DBeaverRuntime.call(wizard, "getDataSourceRegistry");
         return new WizardDialogState(wizard, shell, registry);
     }
 
@@ -1289,8 +1301,8 @@ final class DBeaverConnections {
             throws Exception {
         if (expected == actual) return true;
         if (expected == null || actual == null) return false;
-        Object expectedId = DataExportPlugin.call(expected, "getId");
-        Object actualId = DataExportPlugin.call(actual, "getId");
+        Object expectedId = DBeaverRuntime.call(expected, "getId");
+        Object actualId = DBeaverRuntime.call(actual, "getId");
         return expectedId != null && expectedId.equals(actualId);
     }
 
@@ -1310,7 +1322,7 @@ final class DBeaverConnections {
         NativeDirectStore store = null;
         try {
             Object descriptor = operation.wizard == null ? null
-                    : DataExportPlugin.call(
+                    : DBeaverRuntime.call(
                             operation.wizard, "getOriginalDataSource");
             if (descriptor == null) {
                 finish(operation, "cancelled", false, false, null,
@@ -1325,7 +1337,7 @@ final class DBeaverConnections {
                         "wizard did not produce a new request-owned profile", null);
                 return;
             }
-            Object descriptorRegistry = DataExportPlugin.call(descriptor, "getRegistry");
+            Object descriptorRegistry = DBeaverRuntime.call(descriptor, "getRegistry");
             boolean projectMatches = operation.project.id.equals(
                     profile.identity.projectId)
                     && descriptorRegistry == operation.project.registry;
@@ -1378,10 +1390,10 @@ final class DBeaverConnections {
     private static NativeDirectStore nativeStoreForDescriptor(
             DBeaverWorkspace.ProjectContext expected, Object descriptor)
             throws Exception {
-        Object actualProject = DataExportPlugin.call(descriptor, "getProject");
-        Object registry = DataExportPlugin.call(descriptor, "getRegistry");
+        Object actualProject = DBeaverRuntime.call(descriptor, "getProject");
+        Object registry = DBeaverRuntime.call(descriptor, "getRegistry");
         String projectId = actualProject == null ? null
-                : string(DataExportPlugin.call(actualProject, "getId"));
+                : string(DBeaverRuntime.call(actualProject, "getId"));
         if (registry != expected.registry || !expected.id.equals(projectId)) {
             throw new IllegalStateException("profile belongs to a different project registry");
         }
@@ -1391,15 +1403,15 @@ final class DBeaverConnections {
     private static CleanupOutcome cleanupUnexpectedProfile(Operation operation,
             Object descriptor, Profile profile) {
         try {
-            Object actualProject = DataExportPlugin.call(descriptor, "getProject");
-            Object registry = DataExportPlugin.call(descriptor, "getRegistry");
+            Object actualProject = DBeaverRuntime.call(descriptor, "getProject");
+            Object registry = DBeaverRuntime.call(descriptor, "getRegistry");
             String projectId = actualProject == null ? null
-                    : string(DataExportPlugin.call(actualProject, "getId"));
+                    : string(DBeaverRuntime.call(actualProject, "getId"));
             if (projectId == null || registry == null) {
                 return new CleanupOutcome(false, false, false, false);
             }
-            Object registered = DataExportPlugin.call(registry, "getDataSource",
-                    DataExportPlugin.arr(profile.identity.id));
+            Object registered = DBeaverRuntime.call(registry, "getDataSource",
+                    DBeaverRuntime.arr(profile.identity.id));
             if (registered != descriptor) {
                 return new CleanupOutcome(false, false, false, registered == null);
             }
@@ -1446,7 +1458,7 @@ final class DBeaverConnections {
                 }
         }, "dbeaver-connection-watchdog-" + operation.id);
         watchdog.setDaemon(true);
-        watchdog.setContextClassLoader(DataExportPlugin.class.getClassLoader());
+        watchdog.setContextClassLoader(DBeaverRuntime.class.getClassLoader());
         watchdog.start();
     }
 
@@ -1525,9 +1537,9 @@ final class DBeaverConnections {
         if (shell == null && operation.wizard != null) {
             try {
                 Object dialog = operation.dialog;
-                if (dialog != null && DataExportPlugin.call(dialog, "getWizard")
+                if (dialog != null && DBeaverRuntime.call(dialog, "getWizard")
                         == operation.wizard) {
-                    shell = DataExportPlugin.call(dialog, "getShell");
+                    shell = DBeaverRuntime.call(dialog, "getShell");
                 }
             } catch (Exception failure) {
                 attempted = true;
@@ -1538,11 +1550,11 @@ final class DBeaverConnections {
             attempted = true;
             try {
                 shellClosed = Boolean.TRUE.equals(
-                        DataExportPlugin.call(shell, "isDisposed"));
+                        DBeaverRuntime.call(shell, "isDisposed"));
                 if (!shellClosed) {
-                    DataExportPlugin.call(shell, "close");
+                    DBeaverRuntime.call(shell, "close");
                     shellClosed = Boolean.TRUE.equals(
-                            DataExportPlugin.call(shell, "isDisposed"));
+                            DBeaverRuntime.call(shell, "isDisposed"));
                     if (!shellClosed) completed = false;
                 }
             } catch (Exception failure) {
@@ -1552,7 +1564,7 @@ final class DBeaverConnections {
         if (operation.wizard != null && !shellClosed) {
             attempted = true;
             try {
-                DataExportPlugin.call(operation.wizard, "dispose");
+                DBeaverRuntime.call(operation.wizard, "dispose");
             } catch (Exception failure) {
                 completed = false;
             }
@@ -1648,15 +1660,15 @@ final class DBeaverConnections {
 
     static Class<?> uiClass(String name) throws Exception {
         Object platformUi = call(
-                DataExportPlugin.c("org.jkiss.dbeaver.runtime.DBWorkbench"),
+                DBeaverRuntime.c("org.jkiss.dbeaver.runtime.DBWorkbench"),
                 "getPlatformUI");
         if (platformUi == null) {
-            throw new DataExportPlugin.HttpException(503, "DBeaver UI is unavailable");
+            throw new HttpException(503, "DBeaver UI is unavailable");
         }
         try {
-            return DataExportPlugin.providerClass(platformUi, name);
+            return DBeaverRuntime.providerClass(platformUi, name);
         } catch (ClassNotFoundException unavailable) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     503, "DBeaver native connection UI is unavailable");
         }
     }
@@ -1687,7 +1699,7 @@ final class DBeaverConnections {
 
     private static void assertNoNativeWizard() throws Exception {
         if (isNativeWizardOpen()) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     409, "a native connection wizard is already open");
         }
     }
@@ -1696,7 +1708,7 @@ final class DBeaverConnections {
             Object driver, Object configuration) throws Exception {
         Set<String> before = store.ids();
         if (store.nameExists(name)) {
-            throw new DataExportPlugin.HttpException(
+            throw new HttpException(
                     409, "a data source with that name already exists");
         }
         Profile profile = null;
@@ -1708,12 +1720,12 @@ final class DBeaverConnections {
             }
             if (before.contains(profile.identity.id)) {
                 store.dispose(profile);
-                throw new DataExportPlugin.HttpException(
+                throw new HttpException(
                         409, "DBeaver generated a colliding data source identity");
             }
             if (store.nameExists(name)) {
                 store.dispose(profile);
-                throw new DataExportPlugin.HttpException(
+                throw new HttpException(
                         409, "a data source with that name already exists");
             }
             store.add(profile);
@@ -1725,7 +1737,7 @@ final class DBeaverConnections {
                 throw new IllegalStateException("DBeaver did not confirm profile persistence");
             }
             return directSuccess(profile.identity);
-        } catch (DataExportPlugin.HttpException collision) {
+        } catch (HttpException collision) {
             throw collision;
         } catch (Exception failure) {
             CleanupOutcome cleanup = profile == null
@@ -1786,10 +1798,10 @@ final class DBeaverConnections {
 
     private static boolean nameExists(Object registry, String name)
             throws Exception {
-        Object dataSources = DataExportPlugin.call(registry, "getDataSources");
+        Object dataSources = DBeaverRuntime.call(registry, "getDataSources");
         if (!(dataSources instanceof Iterable)) return false;
         for (Object dataSource : (Iterable<?>) dataSources) {
-            Object currentName = DataExportPlugin.call(dataSource, "getName");
+            Object currentName = DBeaverRuntime.call(dataSource, "getName");
             if (currentName instanceof String
                     && name.equalsIgnoreCase((String) currentName)) return true;
         }
@@ -1798,12 +1810,12 @@ final class DBeaverConnections {
 
     private static Set<String> ids(Object registry) throws Exception {
         Set<String> ids = new HashSet<String>();
-        Object dataSources = DataExportPlugin.call(registry, "getDataSources");
+        Object dataSources = DBeaverRuntime.call(registry, "getDataSources");
         if (!(dataSources instanceof Iterable)) {
             throw new IllegalStateException("data source registry returned no profile list");
         }
         for (Object dataSource : (Iterable<?>) dataSources) {
-            Object id = DataExportPlugin.call(dataSource, "getId");
+            Object id = DBeaverRuntime.call(dataSource, "getId");
             if (id instanceof String) ids.add((String) id);
         }
         return ids;
@@ -1840,27 +1852,27 @@ final class DBeaverConnections {
 
         @Override public Profile create(String name, Object driver,
                 Object configuration) throws Exception {
-            Object descriptor = DataExportPlugin.call(project.registry,
-                    "createDataSource", DataExportPlugin.arr(driver, configuration));
+            Object descriptor = DBeaverRuntime.call(project.registry,
+                    "createDataSource", DBeaverRuntime.arr(driver, configuration));
             if (descriptor == null) return null;
-            DataExportPlugin.call(descriptor, "setName", DataExportPlugin.arr(name));
+            DBeaverRuntime.call(descriptor, "setName", DBeaverRuntime.arr(name));
             return nativeProfile(descriptor);
         }
 
         @Override public void add(Profile profile) throws Exception {
-            DataExportPlugin.call(project.registry, "addDataSource",
-                    DataExportPlugin.arr(profile.handle));
+            DBeaverRuntime.call(project.registry, "addDataSource",
+                    DBeaverRuntime.arr(profile.handle));
         }
 
         @Override public boolean isRegistered(Profile profile) throws Exception {
-            Object current = DataExportPlugin.call(project.registry,
-                    "getDataSource", DataExportPlugin.arr(profile.identity.id));
+            Object current = DBeaverRuntime.call(project.registry,
+                    "getDataSource", DBeaverRuntime.arr(profile.identity.id));
             return current == profile.handle;
         }
 
         @Override public void checkForErrors() throws Exception {
-            DataExportPlugin.call(project.registry, "checkForErrors");
-            Object error = DataExportPlugin.call(project.registry, "getLastError");
+            DBeaverRuntime.call(project.registry, "checkForErrors");
+            Object error = DBeaverRuntime.call(project.registry, "getLastError");
             if (error != null) throw new IllegalStateException("registry reported a save error");
         }
 
@@ -1871,20 +1883,20 @@ final class DBeaverConnections {
 
         ConnectionSettings.StoredProfile readPersisted(Profile profile)
                 throws Exception {
-            Object storage = DataExportPlugin.call(
+            Object storage = DBeaverRuntime.call(
                     profile.handle, "getConfigurationStorage");
             String storageName = storage == null ? null
-                    : string(DataExportPlugin.call(storage, "getStorageName"));
+                    : string(DBeaverRuntime.call(storage, "getStorageName"));
             if (storageName == null || storageName.isEmpty()) {
                 throw new IllegalStateException("profile storage name is unavailable");
             }
-            Object manager = DataExportPlugin.call(project.registry,
+            Object manager = DBeaverRuntime.call(project.registry,
                     "getConfigurationManager");
             if (manager == null) {
                 throw new IllegalStateException("profile storage cannot be inspected");
             }
-            Object stream = DataExportPlugin.call(manager, "readConfiguration",
-                    DataExportPlugin.arr(storageName,
+            Object stream = DBeaverRuntime.call(manager, "readConfiguration",
+                    DBeaverRuntime.arr(storageName,
                             Collections.singleton(profile.identity.id)));
             if (!(stream instanceof InputStream)) return null;
             try (InputStream input = (InputStream) stream) {
@@ -1893,12 +1905,12 @@ final class DBeaverConnections {
         }
 
         @Override public void remove(Profile profile) throws Exception {
-            DataExportPlugin.call(project.registry, "removeDataSource",
-                    DataExportPlugin.arr(profile.handle));
+            DBeaverRuntime.call(project.registry, "removeDataSource",
+                    DBeaverRuntime.arr(profile.handle));
         }
 
         @Override public void dispose(Profile profile) throws Exception {
-            DataExportPlugin.call(profile.handle, "dispose");
+            DBeaverRuntime.call(profile.handle, "dispose");
         }
     }
 
@@ -1906,10 +1918,10 @@ final class DBeaverConnections {
 
     private static boolean directRequirementsSupported(Object driver)
             throws Exception {
-        String providerId = string(DataExportPlugin.call(driver, "getProviderId"));
-        Object main = DataExportPlugin.call(driver, "getMainPropertyDescriptors");
+        String providerId = string(DBeaverRuntime.call(driver, "getProviderId"));
+        Object main = DBeaverRuntime.call(driver, "getMainPropertyDescriptors");
         if (hasSensitiveRequiredProperty(main, providerId)) return false;
-        Object provider = DataExportPlugin.call(
+        Object provider = DBeaverRuntime.call(
                 driver, "getProviderPropertyDescriptors");
         if (provider == null || !provider.getClass().isArray()) return true;
         for (int i = 0; i < Array.getLength(provider); i++) {
@@ -1935,13 +1947,13 @@ final class DBeaverConnections {
 
     private static void validateDirectRequiredProperties(CreationRequest spec,
             Object driver) throws Exception {
-        String providerId = string(DataExportPlugin.call(driver, "getProviderId"));
+        String providerId = string(DBeaverRuntime.call(driver, "getProviderId"));
         Map<?, ?> supplied = spec.connection.get("properties") instanceof Map
                 ? (Map<?, ?>) spec.connection.get("properties")
                 : Collections.emptyMap();
-        Object main = DataExportPlugin.call(driver, "getMainPropertyDescriptors");
+        Object main = DBeaverRuntime.call(driver, "getMainPropertyDescriptors");
         validateRequiredProperties(main, supplied, false, providerId);
-        Object provider = DataExportPlugin.call(
+        Object provider = DBeaverRuntime.call(
                 driver, "getProviderPropertyDescriptors");
         validateRequiredProperties(provider, Collections.emptyMap(), true, providerId);
     }
@@ -1971,9 +1983,9 @@ final class DBeaverConnections {
     private static void applyPropertyDefaults(Object configuration, Object driver,
             String descriptorMethod, String setterMethod, Object supplied)
             throws Exception {
-        Object descriptors = DataExportPlugin.call(driver, descriptorMethod);
+        Object descriptors = DBeaverRuntime.call(driver, descriptorMethod);
         if (descriptors == null || !descriptors.getClass().isArray()) return;
-        String providerId = string(DataExportPlugin.call(driver, "getProviderId"));
+        String providerId = string(DBeaverRuntime.call(driver, "getProviderId"));
         Map<?, ?> present = supplied instanceof Map
                 ? (Map<?, ?>) supplied : Collections.emptyMap();
         for (int i = 0; i < Array.getLength(descriptors); i++) {
@@ -1981,8 +1993,8 @@ final class DBeaverConnections {
             String id = string(call(descriptor, "getId"));
             String value = safeDefault(descriptor, providerId);
             if (id != null && value != null && !present.containsKey(id)) {
-                DataExportPlugin.call(configuration, setterMethod,
-                        DataExportPlugin.arr(id, value));
+                DBeaverRuntime.call(configuration, setterMethod,
+                        DBeaverRuntime.arr(id, value));
             }
         }
     }
@@ -2051,16 +2063,13 @@ final class DBeaverConnections {
     }
 
     private static RuntimeException badRequest(String message) {
-        return new DataExportPlugin.HttpException(400, message);
+        return new HttpException(400, message);
     }
 
     private static RuntimeException unsupported(String message) {
-        return new DataExportPlugin.HttpException(422, message);
+        return new HttpException(422, message);
     }
 
-    private static Object[] arr(Object... values) {
-        return DataExportPlugin.arr(values);
-    }
 
     static final class CreationRequest {
         final String projectId, mode, providerId, driverId, name;
@@ -2202,9 +2211,9 @@ final class DBeaverConnections {
         }
     }
 
-    static final class Result {
-        final int status;
-        final Map<String, Object> body;
+    public static final class Result {
+        public final int status;
+        public final Map<String, Object> body;
         Result(int status, Map<String, Object> body) {
             this.status = status;
             this.body = body;

@@ -1,4 +1,4 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.utils;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -15,7 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 /** Strict JSON handling shared by the new administrative request endpoints. */
-final class JsonRequests {
+public final class JsonRequests {
     private static final int MAX_NESTING = 100;
     private static final int MAX_NUMBER_LENGTH = 128;
     private static final int MAX_NUMBER_EXPONENT = 10000;
@@ -23,7 +23,7 @@ final class JsonRequests {
 
     private JsonRequests() { }
 
-    static Map<String, Object> parseObject(String body) {
+    public static Map<String, Object> parseObject(String body) {
         if (body == null) {
             throw invalidJson();
         }
@@ -42,11 +42,11 @@ final class JsonRequests {
         }
     }
 
-    static String toJson(Object value) {
+    public static String toJson(Object value) {
         return WRITER.toJson(value);
     }
 
-    static String string(Map<String, Object> object, String key, boolean required) {
+    public static String string(Map<String, Object> object, String key, boolean required) {
         if (!object.containsKey(key)) {
             if (required) {
                 throw invalidField();
@@ -75,7 +75,7 @@ final class JsonRequests {
         return (Boolean) value;
     }
 
-    static Map<String, Object> object(
+    public static Map<String, Object> object(
             Map<String, Object> object, String key, boolean required) {
         if (!object.containsKey(key)) {
             if (required) {
@@ -92,7 +92,7 @@ final class JsonRequests {
         return result;
     }
 
-    static void requireKeys(Map<String, Object> object, String... allowed) {
+    public static void requireKeys(Map<String, Object> object, String... allowed) {
         for (String key : object.keySet()) {
             boolean found = false;
             for (String candidate : allowed) {

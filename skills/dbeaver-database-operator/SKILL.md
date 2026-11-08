@@ -1,6 +1,6 @@
 ---
 name: dbeaver-database-operator
-description: Operate project-qualified DBeaver data sources through the local data API: discover projects and drivers, create and natively configure connections, safely inspect and test them, diagnose and edit settings, discover schemas, page rows, and execute provider SQL.
+description: "Operate project-qualified DBeaver data sources through the local data API: discover projects and drivers, create and natively configure connections, safely inspect and test them, diagnose and edit settings, discover schemas, page rows, execute provider SQL, and perform explicitly authorized privileged JVM evaluation."
 ---
 
 # DBeaver Database Operator
@@ -15,16 +15,18 @@ interaction.
 
 ## Access and target selection
 
-The API has no plugin-managed authentication; the server listens on
-`http://127.0.0.1:8765` by default. The bundled client accepts only loopback IP
-URLs, never follows redirects, and disables environment proxies. Use
-`--base-url` or `DBEAVER_DATA_API_URL` only to select a loopback destination.
-Friendly project names resolve through `/projects`; a known `--project-id` is
-passed directly. Datasource names resolve through
-`/datasources?projectId=...`. All routes are unauthenticated at the plugin
-level. The existing `Origin` rejection applies only to project/driver
-discovery, datasource create/inspect/edit/test, and connection-operation
-status routes; the client itself sends no `Origin`. See
+The API has no plugin-managed authentication, token, or runtime-availability
+setting; the server listens on `http://127.0.0.1:8765` by default. The bundled
+client accepts only loopback IP URLs, never follows redirects, and disables
+environment proxies. Use `--base-url` or `DBEAVER_DATA_API_URL` only to select
+a loopback destination. Friendly project names resolve through `/projects`;
+a known `--project-id` is passed directly. Datasource names resolve through
+`/datasources?projectId=...`. The existing `Origin` rejection applies to
+project/driver discovery, datasource create/inspect/edit/test,
+connection-operation status, and runtime evaluation; the client itself sends
+no `Origin`. Loopback and `Origin` rejection are not authentication or
+protection from other local processes able to access the listener. Any
+external protection must cover direct listener access. See
 [references/api.md](references/api.md) for the complete HTTP contract.
 
 From PowerShell, set the client path once:
@@ -214,3 +216,41 @@ connection's default database. Inspection may show safe `authSource` and
 - Treat any nonzero client exit as failure. An HTTP error or operation failure
   is not a successful connection or SQL result. Never automatically retry a
   connection-creation POST; inspect the operation/profile and reconcile first.
+
+## Explicitly authorized JVM evaluation
+
+Use `runtime-evaluate` only when the user explicitly authorizes running the
+requested Java code inside the DBeaver JVM. It is arbitrary in-process code,
+not a safe inspection or data-export operation: there is no sandbox, credential
+isolation, transaction, rollback, or hard server timeout. Unlike the API's
+explicitly safe existing-connection snapshots, snippets may access the
+DBeaver process and its available state. Do not infer permission to run code
+from a request merely to inspect or diagnose; follow the user's precise intent,
+and do not add implicit mutations.
+
+Prepare a UTF-8 JSON file containing only `code` and optional `args`. `code`
+must be a nonblank Java 17 method body, not a class or import block. `args`
+must be a JSON object (or omit it for an empty map); request numbers arrive in
+Java as `BigDecimal`. For example:
+
+```json
+{
+  "code": "return ((java.math.BigDecimal) args.get(\"amount\")).add(new java.math.BigDecimal(\"1\"));",
+  "args": {"amount": 1.25}
+}
+```
+
+```powershell
+python $dbApi runtime-evaluate --request-file "runtime-request.json"
+```
+
+The endpoint runs on an existing HTTP background worker. It does not
+automatically dispatch to the SWT/UI thread; code that needs DBeaver UI access
+must explicitly perform the appropriate native UI dispatch. Stdout and stderr
+are not captured or redirected. Results are limited to JSON-safe null,
+strings, booleans, finite supported numbers, lists, and string-keyed maps,
+recursively; arbitrary native objects cannot be returned. The CLI's
+`--http-timeout` controls only how long the client waits. A timeout, connection
+loss, truncated response, or other transport/read failure does not stop
+evaluation; code may still complete or mutate state. Never automatically
+replay a runtime-evaluation request after an ambiguous transport/read failure.

@@ -1,4 +1,6 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.connection;
+
+import com.janetfilter.dbeaver.export.runtime.DBeaverRuntime;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -52,7 +54,7 @@ final class DBeaverConnectionTester {
             }
         }, "dbeaver-connection-test-" + operation.id);
         worker.setDaemon(true);
-        worker.setContextClassLoader(DataExportPlugin.class.getClassLoader());
+        worker.setContextClassLoader(DBeaverRuntime.class.getClassLoader());
         worker.start();
     }
 
@@ -85,9 +87,9 @@ final class DBeaverConnectionTester {
                     false, null);
         }
         String restriction = ownershipRestriction(
-                Boolean.TRUE.equals(DataExportPlugin.call(
+                Boolean.TRUE.equals(DBeaverRuntime.call(
                         original, "isSharedCredentials"))
-                        || Boolean.TRUE.equals(DataExportPlugin.call(
+                        || Boolean.TRUE.equals(DBeaverRuntime.call(
                                 original, "isSharedCredentialsSelected")),
                 hasStartupHooks(original), hasDistributedHandler(original));
         if (restriction != null) {
@@ -96,7 +98,7 @@ final class DBeaverConnectionTester {
 
         long started = System.nanoTime();
         long deadline = deadlineAfterMillis(timeoutMillis);
-        Object registry = DataExportPlugin.call(original, "getRegistry");
+        Object registry = DBeaverRuntime.call(original, "getRegistry");
         if (registry == null) {
             return failed("unavailable", "The connection registry is unavailable.",
                     false, null);
@@ -113,28 +115,28 @@ final class DBeaverConnectionTester {
         Throwable nativeFailure = null;
         DBeaverConnections.CleanupOutcome cleanup = null;
         try {
-            Object copy = DataExportPlugin.call(registry, "createDataSource",
-                    DataExportPlugin.arr(original));
+            Object copy = DBeaverRuntime.call(registry, "createDataSource",
+                    DBeaverRuntime.arr(original));
             if (copy == null || copy == original) {
                 throw new IllegalStateException("native temporary profile unavailable");
             }
-            Object candidateId = DataExportPlugin.call(copy, "getId");
-            if (candidateId != null && DataExportPlugin.call(registry, "getDataSource",
-                    DataExportPlugin.arr(candidateId)) == copy) {
+            Object candidateId = DBeaverRuntime.call(copy, "getId");
+            if (candidateId != null && DBeaverRuntime.call(registry, "getDataSource",
+                    DBeaverRuntime.arr(candidateId)) == copy) {
                 throw new IllegalStateException("native factory returned a registered profile");
             }
             temporary = copy;
-            Object driver = DataExportPlugin.call(temporary, "getDriver");
+            Object driver = DBeaverRuntime.call(temporary, "getDriver");
             Class<?> descriptorClass = temporary.getClass();
             String temporaryId = null;
             for (int attempt = 0; attempt < 8; attempt++) {
-                Object candidate = DataExportPlugin.call(descriptorClass,
-                        "generateNewId", DataExportPlugin.arr(driver));
+                Object candidate = DBeaverRuntime.call(descriptorClass,
+                        "generateNewId", DBeaverRuntime.arr(driver));
                 if (!(candidate instanceof String) || ((String) candidate).isEmpty()) {
                     continue;
                 }
-                Object collision = DataExportPlugin.call(registry, "getDataSource",
-                        DataExportPlugin.arr(candidate));
+                Object collision = DBeaverRuntime.call(registry, "getDataSource",
+                        DBeaverRuntime.arr(candidate));
                 if (collision == null) {
                     temporaryId = (String) candidate;
                     break;
@@ -143,15 +145,15 @@ final class DBeaverConnectionTester {
             if (temporaryId == null) {
                 throw new IllegalStateException("native temporary identity unavailable");
             }
-            DataExportPlugin.call(temporary, "setId",
-                    DataExportPlugin.arr(temporaryId));
-            DataExportPlugin.call(temporary, "setTemporary",
-                    DataExportPlugin.arr(Boolean.TRUE));
-            if (!temporaryId.equals(DataExportPlugin.call(temporary, "getId"))
-                    || !Boolean.TRUE.equals(DataExportPlugin.call(
+            DBeaverRuntime.call(temporary, "setId",
+                    DBeaverRuntime.arr(temporaryId));
+            DBeaverRuntime.call(temporary, "setTemporary",
+                    DBeaverRuntime.arr(Boolean.TRUE));
+            if (!temporaryId.equals(DBeaverRuntime.call(temporary, "getId"))
+                    || !Boolean.TRUE.equals(DBeaverRuntime.call(
                             temporary, "isTemporary"))
-                    || DataExportPlugin.call(registry, "getDataSource",
-                            DataExportPlugin.arr(temporaryId)) != null) {
+                    || DBeaverRuntime.call(registry, "getDataSource",
+                            DBeaverRuntime.arr(temporaryId)) != null) {
                 throw new IllegalStateException("native temporary ownership could not be confirmed");
             }
 
@@ -183,29 +185,29 @@ final class DBeaverConnectionTester {
                             return null;
                         }
                     });
-            job = DataExportPlugin.construct(testJobClass, temporary, callback);
-            Object monitor = DataExportPlugin.createMonitorProxy(temporary, deadline);
+            job = DBeaverRuntime.construct(testJobClass, temporary, callback);
+            Object monitor = DBeaverRuntime.createMonitorProxy(temporary, deadline);
             if (monitor == null) {
                 throw new IllegalStateException("native connection monitor unavailable");
             }
-            DataExportPlugin.call(job, "setOwnerMonitor",
-                    DataExportPlugin.arr(monitor));
-            DataExportPlugin.call(job, "schedule");
+            DBeaverRuntime.call(job, "setOwnerMonitor",
+                    DBeaverRuntime.arr(monitor));
+            DBeaverRuntime.call(job, "schedule");
             while (isScheduledOrRunning(job)) {
                 if (System.nanoTime() >= deadline) {
                     timedOut = true;
-                    DataExportPlugin.call(job, "cancel");
+                    DBeaverRuntime.call(job, "cancel");
                     break;
                 }
                 Thread.sleep(POLL_MILLIS);
             }
             if (timedOut) waitUntilStopped(job, CLEANUP_GRACE_MILLIS);
 
-            Object connectError = DataExportPlugin.call(job, "getConnectError");
-            Object status = DataExportPlugin.call(job, "getConnectStatus");
+            Object connectError = DBeaverRuntime.call(job, "getConnectError");
+            Object status = DBeaverRuntime.call(job, "getConnectStatus");
             connectErrorAbsent = connectError == null;
             nativeStatusOk = status != null
-                    && Boolean.TRUE.equals(DataExportPlugin.call(status, "isOK"));
+                    && Boolean.TRUE.equals(DBeaverRuntime.call(status, "isOK"));
             boolean nativeCancelled = isCancelledStatus(status);
             if (timedOut || System.nanoTime() >= deadline) {
                 timedOut = true;
@@ -227,7 +229,7 @@ final class DBeaverConnectionTester {
             timedOut = System.nanoTime() >= deadline;
             failureClass = timedOut ? "timeout" : "cancelled";
             if (job != null) {
-                try { DataExportPlugin.call(job, "cancel"); }
+                try { DBeaverRuntime.call(job, "cancel"); }
                 catch (Exception ignored) { }
                 waitUntilStopped(job, CLEANUP_GRACE_MILLIS);
             }
@@ -235,7 +237,7 @@ final class DBeaverConnectionTester {
             failureClass = classify(failure);
             nativeFailure = failure;
             if (job != null) {
-                try { DataExportPlugin.call(job, "cancel"); }
+                try { DBeaverRuntime.call(job, "cancel"); }
                 catch (Exception ignored) { }
                 waitUntilStopped(job, CLEANUP_GRACE_MILLIS);
             }
@@ -262,7 +264,7 @@ final class DBeaverConnectionTester {
         result.put("session", sessionSeen.get());
         if (sessionType.get() != null) result.put("sessionType", sessionType.get());
         result.put("elapsedMillis", job == null ? elapsed
-                : DataExportPlugin.call(job, "getConnectTime"));
+                : DBeaverRuntime.call(job, "getConnectTime"));
         result.put("totalElapsedMillis", elapsed);
         if (timedOut) result.put("timedOut", true);
         if (testSucceeded) {
@@ -285,35 +287,35 @@ final class DBeaverConnectionTester {
             Object job, String nameMethod, String versionMethod) throws Exception {
         if (job == null) return;
         Map<String, Object> metadata = new LinkedHashMap<String, Object>();
-        Object name = DataExportPlugin.call(job, nameMethod);
-        Object version = DataExportPlugin.call(job, versionMethod);
+        Object name = DBeaverRuntime.call(job, nameMethod);
+        Object version = DBeaverRuntime.call(job, versionMethod);
         if (name instanceof String && !((String) name).isEmpty()) metadata.put("name", name);
         if (version instanceof String && !((String) version).isEmpty()) metadata.put("version", version);
         if (!metadata.isEmpty()) result.put(key, metadata);
     }
 
     static boolean hasStartupHooks(Object descriptor) throws Exception {
-        Object configuration = DataExportPlugin.call(
+        Object configuration = DBeaverRuntime.call(
                 descriptor, "getConnectionConfiguration");
         if (configuration == null) return false;
-        Object url = DataExportPlugin.call(configuration, "getUrl");
+        Object url = DBeaverRuntime.call(configuration, "getUrl");
         if (url instanceof String && URL_STARTUP_OPTION.matcher((String) url).find()) {
             return true;
         }
-        Object bootstrap = DataExportPlugin.call(configuration, "getBootstrap");
+        Object bootstrap = DBeaverRuntime.call(configuration, "getBootstrap");
         Object queries = bootstrap == null ? null
-                : DataExportPlugin.call(bootstrap, "getInitQueries");
+                : DBeaverRuntime.call(bootstrap, "getInitQueries");
         if (queries instanceof Iterable && ((Iterable<?>) queries).iterator().hasNext()) {
             return true;
         }
-        Object events = DataExportPlugin.call(configuration, "getDeclaredEvents");
+        Object events = DBeaverRuntime.call(configuration, "getDeclaredEvents");
         if (events != null && events.getClass().isArray()) {
             for (int index = 0; index < java.lang.reflect.Array.getLength(events); index++) {
                 Object event = java.lang.reflect.Array.get(events, index);
-                Object command = DataExportPlugin.call(configuration, "getEvent",
-                        DataExportPlugin.arr(event));
+                Object command = DBeaverRuntime.call(configuration, "getEvent",
+                        DBeaverRuntime.arr(event));
                 if (command != null && Boolean.TRUE.equals(
-                        DataExportPlugin.call(command, "isEnabled"))) return true;
+                        DBeaverRuntime.call(command, "isEnabled"))) return true;
             }
         }
         return hasHookProperty(configuration, "getProperties")
@@ -322,7 +324,7 @@ final class DBeaverConnectionTester {
 
     private static boolean hasHookProperty(Object configuration, String method)
             throws Exception {
-        Object properties = DataExportPlugin.call(configuration, method);
+        Object properties = DBeaverRuntime.call(configuration, method);
         if (!(properties instanceof Map)) return false;
         for (Object key : ((Map<?, ?>) properties).keySet()) {
             if (!(key instanceof String)) continue;
@@ -357,19 +359,19 @@ final class DBeaverConnectionTester {
     }
 
     static boolean hasDistributedHandler(Object descriptor) throws Exception {
-        Object configuration = DataExportPlugin.call(
+        Object configuration = DBeaverRuntime.call(
                 descriptor, "getConnectionConfiguration");
         Object handlers = configuration == null ? null
-                : DataExportPlugin.call(configuration, "getHandlers");
+                : DBeaverRuntime.call(configuration, "getHandlers");
         if (!(handlers instanceof Iterable)) return false;
         for (Object handler : (Iterable<?>) handlers) {
-            if (!Boolean.TRUE.equals(DataExportPlugin.call(handler, "isEnabled"))) {
+            if (!Boolean.TRUE.equals(DBeaverRuntime.call(handler, "isEnabled"))) {
                 continue;
             }
-            Object handlerDescriptor = DataExportPlugin.call(
+            Object handlerDescriptor = DBeaverRuntime.call(
                     handler, "getHandlerDescriptor");
             if (handlerDescriptor != null && Boolean.TRUE.equals(
-                    DataExportPlugin.call(handlerDescriptor, "isDistributed"))) {
+                    DBeaverRuntime.call(handlerDescriptor, "isDistributed"))) {
                 return true;
             }
         }
@@ -482,7 +484,7 @@ final class DBeaverConnectionTester {
 
     private static Object exceptionFact(Throwable failure, String method) {
         try {
-            return DataExportPlugin.call(failure, method);
+            return DBeaverRuntime.call(failure, method);
         } catch (Exception unavailable) {
             return null;
         }
@@ -555,14 +557,14 @@ final class DBeaverConnectionTester {
     private static boolean isCancelledStatus(Object status) {
         if (status == null) return false;
         try {
-            return Integer.valueOf(8).equals(DataExportPlugin.call(status, "getSeverity"));
+            return Integer.valueOf(8).equals(DBeaverRuntime.call(status, "getSeverity"));
         } catch (Exception unavailable) {
             return false;
         }
     }
 
     private static boolean isScheduledOrRunning(Object job) throws Exception {
-        int state = ((Number) DataExportPlugin.call(job, "getState")).intValue();
+        int state = ((Number) DBeaverRuntime.call(job, "getState")).intValue();
         return state == 1 || state == 2 || state == 4;
     }
 
@@ -585,7 +587,7 @@ final class DBeaverConnectionTester {
             Object registry, Object temporary, Object testJob, long deadline) {
         boolean completed = true;
         try {
-            Object jobManager = DataExportPlugin.call(
+            Object jobManager = DBeaverRuntime.call(
                     DBeaverConnections.uiClass("org.eclipse.core.runtime.jobs.Job"),
                     "getJobManager");
             // A cooperative deadline cannot safely dispose a descriptor still owned by a native job.
@@ -595,9 +597,9 @@ final class DBeaverConnectionTester {
             }
             while (System.nanoTime() < deadline) {
                 boolean connecting = Boolean.TRUE.equals(
-                        DataExportPlugin.call(temporary, "isConnecting"));
+                        DBeaverRuntime.call(temporary, "isConnecting"));
                 boolean connected = Boolean.TRUE.equals(
-                        DataExportPlugin.call(temporary, "isConnected"));
+                        DBeaverRuntime.call(temporary, "isConnected"));
                 boolean testStillRunning = testJob != null
                         && isScheduledOrRunning(testJob);
                 boolean disconnectPending = hasPendingNativeJobs(
@@ -606,55 +608,55 @@ final class DBeaverConnectionTester {
                         && !disconnectPending) break;
                 if (connected && !connecting && !testStillRunning
                         && !disconnectPending) {
-                    Object monitor = DataExportPlugin.createMonitorProxy(
+                    Object monitor = DBeaverRuntime.createMonitorProxy(
                             temporary, deadline);
                     if (monitor == null) {
                         completed = false;
                         break;
                     }
-                    DataExportPlugin.call(temporary, "disconnect",
-                            DataExportPlugin.arr(monitor));
+                    DBeaverRuntime.call(temporary, "disconnect",
+                            DBeaverRuntime.arr(monitor));
                 }
                 Thread.sleep(POLL_MILLIS);
             }
-            while (Boolean.TRUE.equals(DataExportPlugin.call(temporary, "isConnecting"))
+            while (Boolean.TRUE.equals(DBeaverRuntime.call(temporary, "isConnecting"))
                     || hasPendingNativeJobs(jobManager, temporary, testJob)) {
                 Thread.sleep(POLL_MILLIS);
             }
-            if (Boolean.TRUE.equals(DataExportPlugin.call(temporary, "isConnected"))) {
-                Object monitor = DataExportPlugin.createMonitorProxy(
+            if (Boolean.TRUE.equals(DBeaverRuntime.call(temporary, "isConnected"))) {
+                Object monitor = DBeaverRuntime.createMonitorProxy(
                         temporary, deadlineAfterMillis(CLEANUP_GRACE_MILLIS));
                 if (monitor == null) completed = false;
-                else DataExportPlugin.call(temporary, "disconnect", DataExportPlugin.arr(monitor));
+                else DBeaverRuntime.call(temporary, "disconnect", DBeaverRuntime.arr(monitor));
             }
-            if (Boolean.TRUE.equals(DataExportPlugin.call(temporary, "isConnected"))) {
+            if (Boolean.TRUE.equals(DBeaverRuntime.call(temporary, "isConnected"))) {
                 completed = false;
             }
-            String id = (String) DataExportPlugin.call(temporary, "getId");
-            Object registered = DataExportPlugin.call(registry, "getDataSource",
-                    DataExportPlugin.arr(id));
+            String id = (String) DBeaverRuntime.call(temporary, "getId");
+            Object registered = DBeaverRuntime.call(registry, "getDataSource",
+                    DBeaverRuntime.arr(id));
             if (registered == temporary) {
-                DataExportPlugin.call(registry, "removeDataSource",
-                        DataExportPlugin.arr(temporary));
-                DataExportPlugin.call(registry, "checkForErrors");
+                DBeaverRuntime.call(registry, "removeDataSource",
+                        DBeaverRuntime.arr(temporary));
+                DBeaverRuntime.call(registry, "checkForErrors");
             } else if (registered != null) {
                 completed = false;
             }
-            if (DataExportPlugin.call(registry, "getDataSource",
-                    DataExportPlugin.arr(id)) != null) completed = false;
-            if (!Boolean.TRUE.equals(DataExportPlugin.call(temporary, "isDisposed"))) {
-                DataExportPlugin.call(temporary, "dispose");
+            if (DBeaverRuntime.call(registry, "getDataSource",
+                    DBeaverRuntime.arr(id)) != null) completed = false;
+            if (!Boolean.TRUE.equals(DBeaverRuntime.call(temporary, "isDisposed"))) {
+                DBeaverRuntime.call(temporary, "dispose");
             }
-            if (!Boolean.TRUE.equals(DataExportPlugin.call(temporary, "isDisposed"))) {
+            if (!Boolean.TRUE.equals(DBeaverRuntime.call(temporary, "isDisposed"))) {
                 completed = false;
             }
             return new DBeaverConnections.CleanupOutcome(false, false, true, completed);
         } catch (Exception failure) {
             try {
-                if (!Boolean.TRUE.equals(DataExportPlugin.call(temporary, "isConnecting"))
-                        && !Boolean.TRUE.equals(DataExportPlugin.call(temporary, "isConnected"))
-                        && !Boolean.TRUE.equals(DataExportPlugin.call(temporary, "isDisposed"))) {
-                    DataExportPlugin.call(temporary, "dispose");
+                if (!Boolean.TRUE.equals(DBeaverRuntime.call(temporary, "isConnecting"))
+                        && !Boolean.TRUE.equals(DBeaverRuntime.call(temporary, "isConnected"))
+                        && !Boolean.TRUE.equals(DBeaverRuntime.call(temporary, "isDisposed"))) {
+                    DBeaverRuntime.call(temporary, "dispose");
                 }
             } catch (Exception ignored) { }
             return new DBeaverConnections.CleanupOutcome(false, false, true, false);
@@ -663,13 +665,13 @@ final class DBeaverConnectionTester {
 
     private static boolean hasPendingNativeJobs(Object manager, Object container,
             Object testJob) throws Exception {
-        Object jobs = DataExportPlugin.call(manager, "find",
-                DataExportPlugin.arr(container));
+        Object jobs = DBeaverRuntime.call(manager, "find",
+                DBeaverRuntime.arr(container));
         if (jobs == null || !jobs.getClass().isArray()) return false;
         for (int index = 0; index < java.lang.reflect.Array.getLength(jobs); index++) {
             Object job = java.lang.reflect.Array.get(jobs, index);
             if (job == testJob) continue;
-            if (((Number) DataExportPlugin.call(job, "getState")).intValue() != 0) {
+            if (((Number) DBeaverRuntime.call(job, "getState")).intValue() != 0) {
                 return true;
             }
         }

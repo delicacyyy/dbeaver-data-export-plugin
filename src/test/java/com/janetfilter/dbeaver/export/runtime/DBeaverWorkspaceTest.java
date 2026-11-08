@@ -1,4 +1,6 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.runtime;
+
+import com.janetfilter.dbeaver.export.utils.HttpException;
 
 import org.junit.Test;
 import org.junit.function.ThrowingRunnable;
@@ -62,7 +64,7 @@ public class DBeaverWorkspaceTest {
     }
 
     private static void assertStatus(int status, ThrowingRunnable action) {
-        assertEquals(status, assertThrows(DataExportPlugin.HttpException.class, action).status);
+        assertEquals(status, assertThrows(HttpException.class, action).status);
     }
 
     public static final class NativeWorkspace {

@@ -4,13 +4,15 @@
 from __future__ import annotations
 
 import argparse
-from decimal import Decimal
 import json
 import os
-from ipaddress import ip_address
-from pathlib import Path
+import socket
 import sys
 import time
+from decimal import Decimal, InvalidOperation
+from http.client import HTTPException
+from ipaddress import ip_address
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
@@ -95,6 +97,8 @@ def request_json(
     payload: dict[str, Any] | str | None = None,
     timeout: float,
     with_status: bool = False,
+    raw_response_text: bool = False,
+    ambiguous_timeout: bool = False,
 ) -> Any:
     url = base_url.rstrip("/") + path
     if params:
@@ -115,7 +119,14 @@ def request_json(
     opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
     try:
         with opener.open(request, timeout=timeout) as response:
-            value = parse_json_or_text(response.read())
+            raw = response.read()
+            if raw_response_text:
+                try:
+                    value = raw.decode("utf-8")
+                except UnicodeDecodeError as error:
+                    raise ApiError("API returned invalid UTF-8") from error
+            else:
+                value = parse_json_or_text(raw)
             if with_status:
                 return response.getcode(), value
             return value
@@ -125,16 +136,51 @@ def request_json(
             raise ApiError(
                 f"HTTP {error.code}: local API redirect refused"
             ) from error
-        response_body = parse_json_or_text(error.read())
+        try:
+            response_body = parse_json_or_text(error.read())
+        except (TimeoutError, socket.timeout) as read_error:
+            if ambiguous_timeout:
+                raise _runtime_evaluation_timeout(timeout) from read_error
+            raise
+        except (OSError, HTTPException) as read_error:
+            if ambiguous_timeout:
+                raise _runtime_evaluation_transport_error() from read_error
+            raise
         raise ApiError(
             f"HTTP {error.code}: {render(response_body, compact=True)}"
         ) from error
     except URLError as error:
+        if ambiguous_timeout and isinstance(
+            error.reason, (TimeoutError, socket.timeout)
+        ):
+            raise _runtime_evaluation_timeout(timeout) from error
+        if ambiguous_timeout:
+            raise _runtime_evaluation_transport_error() from error
         raise ApiError(f"API unavailable: {error.reason}") from error
-    except TimeoutError as error:
+    except (TimeoutError, socket.timeout) as error:
+        if ambiguous_timeout:
+            raise _runtime_evaluation_timeout(timeout) from error
         raise ApiError(
             f"API request timed out after {timeout:g} seconds"
         ) from error
+    except (OSError, HTTPException) as error:
+        if ambiguous_timeout:
+            raise _runtime_evaluation_transport_error() from error
+        raise
+
+
+def _runtime_evaluation_timeout(timeout: float) -> ApiError:
+    return ApiError(
+        f"Runtime evaluation request timed out after {timeout:g} seconds; "
+        "the submitted code may still execute. Do not retry automatically."
+    )
+
+
+def _runtime_evaluation_transport_error() -> ApiError:
+    return ApiError(
+        "Runtime evaluation transport failed; the execution outcome is unknown "
+        "and the submitted code may still execute. Do not retry automatically."
+    )
 
 
 class InvalidRequestJSON(ValueError):
@@ -221,6 +267,36 @@ def read_json_request(filename: str, label: str) -> tuple[dict[str, Any], str]:
             f"{label.capitalize()} is invalid or exceeds JSON parser limits"
         ) from None
     return value, text
+
+
+def _runtime_response_number(value: str) -> Decimal:
+    try:
+        number = Decimal(value)
+    except (InvalidOperation, ValueError):
+        raise InvalidRequestJSON() from None
+    if not number.is_finite():
+        raise InvalidRequestJSON()
+    return number
+
+
+def _runtime_evaluation_response(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            text,
+            object_pairs_hook=_unique_object,
+            parse_int=_runtime_response_number,
+            parse_constant=_reject_constant,
+            parse_float=_runtime_response_number,
+        )
+    except (ValueError, RecursionError):
+        raise ApiError("Invalid runtime evaluation response from API") from None
+    if not isinstance(value, dict) or "result" not in value:
+        raise ApiError("Invalid runtime evaluation response from API")
+    try:
+        _validate_json_request(value)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ApiError("Invalid runtime evaluation response from API") from None
+    return value
 
 
 def _response_object(value: Any, operation: str) -> dict[str, Any]:
@@ -573,6 +649,30 @@ def _project_params(project: dict[str, Any], datasource: dict[str, Any]) -> dict
 def run(args: argparse.Namespace) -> Any:
     common = {"base_url": args.base_url, "timeout": args.http_timeout}
 
+    if args.command == "runtime-evaluate":
+        request, request_text = read_json_request(
+            args.request_file, "runtime evaluation request"
+        )
+        if set(request) - {"code", "args"}:
+            raise ApiError("Runtime evaluation request contains unsupported fields")
+        if not _nonempty_string(request.get("code")):
+            raise ApiError("Runtime evaluation request requires nonblank code")
+        if "args" in request and not isinstance(request["args"], dict):
+            raise ApiError("Runtime evaluation args must be a JSON object")
+        status, response_text = request_json(
+            **common,
+            path="/runtime/evaluate",
+            method="POST",
+            payload=request_text,
+            with_status=True,
+            raw_response_text=True,
+            ambiguous_timeout=True,
+        )
+        if status != 200:
+            raise ApiError("Invalid runtime evaluation response from API")
+        _runtime_evaluation_response(response_text)
+        return response_text
+
     if args.command == "projects":
         return _get_projects(args)
 
@@ -799,6 +899,14 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Poll with GET until terminal or deadline")
     operation.add_argument("--wait-timeout", type=_wait_seconds, default=300,
                            help=f"Wait deadline in seconds (1–{MAX_WAIT_SECONDS}, default: 300)")
+
+    runtime_evaluate = commands.add_parser(
+        "runtime-evaluate", help="Evaluate a Java method body in the DBeaver JVM"
+    )
+    runtime_evaluate.add_argument(
+        "--request-file", required=True,
+        help="UTF-8 JSON runtime request file, or '-' to read stdin"
+    )
 
     for command, help_text in (
         ("inspect-connection", "Inspect safe saved connection settings"),

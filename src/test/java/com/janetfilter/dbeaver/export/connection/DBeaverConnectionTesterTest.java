@@ -1,4 +1,6 @@
-package com.janetfilter.dbeaver.export;
+package com.janetfilter.dbeaver.export.connection;
+
+import com.janetfilter.dbeaver.export.runtime.DBeaverWorkspace;
 
 import org.junit.Test;
 
