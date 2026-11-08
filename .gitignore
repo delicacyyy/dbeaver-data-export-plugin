@@ -7,5 +7,4 @@ publish/
 .mvn/wrapper/maven-wrapper.jar
 __pycache__/
 *.py[cod]
-.agent/*
-!.agent/AGENTS.md
+/.agent/
