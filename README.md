@@ -21,8 +21,9 @@ for request, response, and error contracts.
 - Maven installed with `mvn` available on `PATH`.
 - Python 3 for the bundled API client; no third-party Python packages are needed.
 
-Commands below use **Bash** (including Git Bash on Windows), starting in this
-repository's root. Replace example absolute paths with your own. In Git Bash,
+Commands below use **Bash** (including Git Bash on Windows), except the Windows
+batch example in the agent-installation section. Start in this repository's
+root and replace example absolute paths with your own. In Git Bash,
 `C:\path\to\jdk` is `/c/path/to/jdk`; on Linux/macOS use the native JDK path.
 
 Select your installed JDK for the current Bash session and check Maven before
@@ -224,6 +225,45 @@ Only JSON-safe values can be returned; native DBeaver objects cannot.
 Evaluation runs on an HTTP worker, not automatically on the SWT/UI thread.
 There is no hard server timeout or cancellation. A client timeout does not
 stop the code; never automatically retry an ambiguous evaluation request.
+
+## Use this in an agent
+
+Register the whole [skill directory](skills/dbeaver-database-operator/), not
+just `SKILL.md`, so its scripts and references remain available. Use a symbolic
+link on Linux/macOS or a directory junction on Windows, not a directory hardlink.
+
+Run from this repository's root. These examples use the user's `.agents/skills`
+directory (`$HOME` on Linux/macOS, `%USERPROFILE%` on Windows). Substitute your
+agent's actual global or project-local skill directory if it uses a different
+discovery path. If `dbeaver-database-operator` already exists there, inspect
+that installation first. The commands do not overwrite it.
+
+### Linux/macOS (Bash)
+
+```bash
+mkdir -p "$HOME/.agents/skills"
+ln -s "$PWD/skills/dbeaver-database-operator" "$HOME/.agents/skills/"
+```
+
+### Windows (Command Prompt / batch)
+
+Run in `cmd.exe` or save as a batch file and run from this repository's root.
+Create a junction with the global skill path as the link and this repository's
+skill path as its target:
+
+```bat
+if not exist "%USERPROFILE%\.agents\skills" mkdir "%USERPROFILE%\.agents\skills"
+
+set "skill_source=%CD%\skills\dbeaver-database-operator"
+set "skill_link=%USERPROFILE%\.agents\skills\dbeaver-database-operator"
+
+mklink /J "%skill_link%" "%skill_source%"
+```
+
+`/J` creates a directory junction; `/D` would create a directory symbolic link.
+
+Reload your agent's skill discovery after registration. Links follow changes
+in this checkout; moving or deleting it breaks the registration.
 
 ## Troubleshooting
 
